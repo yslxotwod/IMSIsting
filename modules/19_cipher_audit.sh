@@ -1503,6 +1503,44 @@ c5388100000000 577 2>/dev/null)
     chk protect-bad-bearer \
         "$(caud_cmd_protect eia1 00 0 32 0 aa >/dev/null 2>&1; echo $?)" "2"
     chk protect-usage "$(caud_cmd_protect >/dev/null 2>&1; echo $?)" "2"
+    # ── --export: one row per session, and unobserved where it is unknown ─
+    chk export-usage     "$(caud_cmd_export >/dev/null 2>&1; echo $?)" "2"
+    chk export-badgen    "$(caud_cmd_export gprs >/dev/null 2>&1; echo $?)" "2"
+    caud_cmd_clear >/dev/null 2>&1
+    out=$(caud_cmd_export lte 2>/dev/null)
+    chk export-empty-rows "$(tail -n +2 <<<"$out" | grep -c .)" "0"
+    chk export-empty-said "$(caud_cmd_export lte 2>&1 >/dev/null | grep -c '^unobserved')" "1"
+    caud_cmd_session lte EEA0 EIA1 "EEA2,EEA1" "EIA2" >/dev/null 2>&1
+    caud_cmd_session lte EEA2 EIA2 >/dev/null 2>&1
+    caud_cmd_session gsm A5/1 n/a >/dev/null 2>&1
+    out=$(caud_cmd_export lte 2>/dev/null)
+    chk export-header "$(head -1 <<<"$out")" \
+        "session	gen	enc_alg	enc_status	enc_points	int_alg	int_status	int_points	overall_rank	ue_declared	ts	note"
+    chk export-lte-rows   "$(tail -n +2 <<<"$out" | grep -c .)" "2"
+    chk export-null-status "$(tail -n +2 <<<"$out" | awk -F'\t' '$3=="EEA0"{print $4}')" "null"
+    chk export-null-points "$(tail -n +2 <<<"$out" | awk -F'\t' '$3=="EEA0"{print $5}')" "100"
+    chk export-null-rank   "$(tail -n +2 <<<"$out" | awk -F'\t' '$3=="EEA0"{print $9}')" "4"
+    chk export-ue-measured "$(tail -n +2 <<<"$out" | awk -F'\t' '$3=="EEA0"{print $10}')" "measured"
+    # A session with no recorded capability set cannot be judged for a
+    # downgrade, and the export says unobserved rather than "none".
+    chk export-ue-unobserved "$(tail -n +2 <<<"$out" | awk -F'\t' '$3=="EEA2"{print $10}')" "unobserved"
+    chk export-all-gen   "$(caud_cmd_export all 2>/dev/null | tail -n +2 | grep -c .)" "3"
+    chk export-gsm-int   "$(caud_cmd_export gsm 2>/dev/null | awk -F'\t' 'NR==2{print $7}')" "n/a"
+    chk export-out-file  "$(caud_cmd_export all "$d/s.tsv" >/dev/null 2>&1; echo $?)" "0"
+    chk export-out-rows  "$(tail -n +2 "$d/s.tsv" | grep -c .)" "3"
+    chk export-store     "$(awk -F'\t' '$2=="export"' "$CAUD_DIR/exports.tsv" | wc -l | tr -d ' ')" "6"
+
+    # ── --html: one file, nothing in it can fetch anything ──────────────
+    local rep="$d/report.html"
+    chk html-rc       "$(caud_cmd_html "$rep" >/dev/null 2>&1; echo $?)" "0"
+    chk html-doctype  "$(head -1 "$rep")" "<!DOCTYPE html>"
+    chk html-no-external "$(grep -c -iE 'http://|https://|<script|<img|<link|@import' "$rep")" "0"
+    chk html-inline-style "$(grep -c '<style>' "$rep")" "1"
+    chk html-algorithm "$(grep -c '<h2>algorithm</h2>' "$rep")" "1"
+    chk html-session   "$(grep -c '<h2>session</h2>' "$rep")" "1"
+    chk html-escaped   "$(grep -c '<b>' "$rep")" "0"
+    chk html-writer    "$(python3 "$IMSISTING_ROOT/tools/html-report.py" --selftest 2>/dev/null | tail -1)" "RESULT	PASS"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1527,6 +1565,8 @@ caud_menu() {
   [7]  downgrade check
   [8]  extract an SMC from a capture (needs module 17)
   [9]  clear the session store
+  [x]  export the sessions as a per-generation TSV
+  [h]  self-contained HTML report
   [0]  back
 
 M
@@ -1559,6 +1599,13 @@ M
                caud_cmd_from_pcap "$p" "$f" | column -t -s$'\t'
                read -rp "  press enter " _ ;;
             9) caud_cmd_clear; sleep 1 ;;
+            x) read -rp "  generation (gsm|umts|lte|5g|all)> " g
+               read -rp "  out.tsv (blank = stdout)> " p
+               caud_cmd_export "$g" "$p" | column -t -s$'\t' 2>/dev/null || caud_cmd_export "$g" "$p"
+               read -rp "  press enter " _ ;;
+            h) read -rp "  out.html (blank = loot)> " p
+               caud_cmd_html "$p"
+               read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1566,6 +1613,140 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── --export: the session store as a per-generation security view ───────
+# A protocol-specific export for this module means one row per recorded
+# session, keyed to its generation, with the algorithm verdicts the table
+# already defines. The columns are the session store's own columns plus the
+# three the scoring path adds (status, points, rank), so an export never
+# carries a judgement that --score would not also make.
+#
+# Two columns can be honestly empty:
+#   ue_declared  the UE's advertised capability set was not recorded for
+#                that session, so a downgrade cannot be judged from it --
+#                the cell says `unobserved`, not "none".
+#   note         free text from whoever recorded the session.
+caud_cmd_export() {
+    local g="${1:-}" out="${2:-}"
+    [[ -n "$g" ]] || {
+        printf 'ERROR\tusage: --export <gsm|umts|lte|5g|all> [out.tsv]\n' >&2; return 2; }
+    case "${g,,}" in gsm|umts|lte|5g|all) ;; *)
+        printf 'ERROR\tunknown generation: %s (want gsm|umts|lte|5g|all)\n' "$(caud_sanitize "$g")" >&2
+        return 2 ;; esac
+    g="${g,,}"
+    caud_sessions_init
+
+    local tmp; tmp=$(mktemp "$MOD_TMP/export.XXXXXX") || {
+        printf 'ERROR\tcannot create a temp file under %s\n' "$MOD_TMP" >&2; return 1; }
+    {
+        printf 'session\tgen\tenc_alg\tenc_status\tenc_points\tint_alg\tint_status\tint_points\toverall_rank\tue_declared\tts\tnote\n'
+        local line sess gen enc int ecaps icaps ts note es is er ir rank ued
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            sess=$(caud_field "$line" 1)
+            [[ "$sess" == "session" ]] && continue
+            gen=$(caud_field "$line" 2)
+            [[ "$g" != "all" && "$gen" != "$g" ]] && continue
+            enc=$(caud_field "$line" 3)
+            int=$(caud_field "$line" 4)
+            ecaps=$(caud_field "$line" 5)
+            icaps=$(caud_field "$line" 6)
+            ts=$(caud_field "$line" 8)
+            note=$(caud_field "$line" 9)
+            [[ -z "$gen" || -z "$enc" ]] && continue
+            es=$(caud_status_of "$gen" "$enc" 2>/dev/null) || es="unknown"
+            is="n/a"
+            [[ "$gen" != "gsm" ]] && { is=$(caud_status_of "$gen" "$int" 2>/dev/null) || is="unknown"; }
+            er=$(caud_points_of "$es")
+            ir=$(caud_points_of "$is")
+            rank=$(caud_rank "$es"); local r2; r2=$(caud_rank "$is")
+            (( r2 > rank )) && rank=$r2
+            if [[ -n "$ecaps" || -n "$icaps" ]]; then
+                ued="measured"
+            else
+                ued="unobserved"
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$(caud_sanitize "$sess")" "$(caud_sanitize "$gen")" \
+                "$(caud_sanitize "$enc")" "$(caud_sanitize "$es")" "$er" \
+                "$(caud_sanitize "$int")" "$(caud_sanitize "$is")" "$ir" \
+                "$rank" "$ued" "$(caud_sanitize "$ts")" "$(caud_sanitize "$note")"
+        done < "$CAUD_SESSIONS"
+    } > "$tmp"
+
+    local nrows; nrows=$(tail -n +2 "$tmp" | grep -c . || true)
+    if [[ "${nrows:-0}" -eq 0 ]]; then
+        printf 'unobserved\t%s\tno session row for this generation in %s: nothing was exported rather than a header-only zero\n' \
+            "$g" "$(caud_sanitize "$CAUD_SESSIONS")" >&2
+    fi
+
+    if [[ -n "$out" ]]; then
+        cp "$tmp" "$out" || { rm -f "$tmp"; printf 'ERROR\tcannot write %s\n' "$(caud_sanitize "$out")" >&2; return 1; }
+        printf 'export\t%s\t%s\t%s rows\n' "$g" "$(caud_sanitize "$out")" "$nrows"
+    else
+        cat "$tmp"
+        printf 'export\t%s\tstdout\t%s rows\n' "$g" "$nrows" >&2
+    fi
+    rm -f "$tmp"
+    mkdir -p "$CAUD_DIR" 2>/dev/null
+    printf '%s\texport\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$g" "$nrows" \
+        >> "$CAUD_DIR/exports.tsv" 2>/dev/null || true
+    return 0
+}
+
+# ── --html: the algorithm table and the sessions as one offline file ────
+# Written by tools/html-report.py: inline stylesheet, no script, no link,
+# no image, no URL. An `unobserved` cell renders in the grey class so a
+# reader cannot mistake it for a clean verdict.
+caud_cmd_html() {
+    local out="${1:-}"
+    local writer="$IMSISTING_ROOT/tools/html-report.py"
+    [[ -f "$writer" ]] || {
+        printf 'ERROR\tunobserved: the report writer is missing at %s\n' "$writer" >&2; return 1; }
+    caud_sessions_init
+    mkdir -p "$CAUD_DIR" 2>/dev/null
+    out="${out:-$CAUD_DIR/report_$(date -u +%Y%m%dT%H%M%SZ).html}"
+
+    {
+        printf 'provenance\tmodule\t19_cipher_audit\tcipher audit tables and stores\n'
+        printf 'provenance\tsessions\t%s\t%s\n' "$(caud_session_count)" "$(caud_sanitize "$CAUD_SESSIONS")"
+        printf 'provenance\twriter\t%s\tself-contained HTML, no external asset\n' "$(basename "$writer")"
+        printf 'doctrine\tunobserved\tunobserved\ta verdict this module did not reach is absent from this report, never printed as ok\n'
+        caud_cmd_table all 2>/dev/null | awk -F'\t' '
+            $1 == "gen" { next }
+            { printf "algorithm\t%s %s\t%s\t%s; %s bits; %s\n", $1, $2, $6, $4, $5, $7 }'
+        local line sess gen enc int ecaps icaps ts es is
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            sess=$(caud_field "$line" 1)
+            [[ "$sess" == "session" ]] && continue
+            gen=$(caud_field "$line" 2); [[ -z "$gen" ]] && continue
+            enc=$(caud_field "$line" 3); int=$(caud_field "$line" 4)
+            ecaps=$(caud_field "$line" 5); icaps=$(caud_field "$line" 6)
+            ts=$(caud_field "$line" 8)
+            es=$(caud_status_of "$gen" "$enc" 2>/dev/null) || es="unknown"
+            is="n/a"; [[ "$gen" != "gsm" ]] && { is=$(caud_status_of "$gen" "$int" 2>/dev/null) || is="unknown"; }
+            printf 'session\t%s\t%s / %s\t%s; enc=%s int=%s; ue_caps=%s\n' \
+                "$(caud_sanitize "$sess")" "$(caud_sanitize "$enc")" "$(caud_sanitize "$int")" \
+                "$(caud_sanitize "$gen")" "$es" "$is" \
+                "$( [[ -n "$ecaps$icaps" ]] && printf '%s,%s' "$(caud_sanitize "$ecaps")" "$(caud_sanitize "$icaps")" || printf 'unobserved')"
+        done < "$CAUD_SESSIONS"
+        caud_cmd_downgrade_check 2>/dev/null | awk -F'\t' '
+            $1 == "session" { next }
+            NF >= 5 { printf "finding\t%s %s\t%s\t%s\n", $1, $3, $4, $5 }'
+    } | python3 "$writer" --title "Cipher audit report" \
+            --source "$(caud_sanitize "$CAUD_SESSIONS")" \
+            --generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$out"
+    local rc=$?
+    [[ $rc -ne 0 || ! -s "$out" ]] && {
+        printf 'ERROR\tthe report writer failed (exit %d); nothing was written to %s\n' \
+            "$rc" "$(caud_sanitize "$out")" >&2; return 1; }
+    printf 'report\t%s\t%s bytes\tself-contained: no script, no link, no external asset\n' \
+        "$(caud_sanitize "$out")" "$(wc -c < "$out" | tr -d ' ')"
+    printf '%s\thtml\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(caud_sanitize "$out")" \
+        >> "$CAUD_DIR/exports.tsv" 2>/dev/null || true
+    return 0
+}
+
 caud_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -1584,6 +1765,8 @@ caud_cli_main() {
         --auth-causes)     caud_cmd_auth_causes "${1:-eps}" ;;
         --auth-session)    caud_cmd_auth_session "${1:-}" ;;
         --sqn-recover)     caud_cmd_sqn_recover "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+        --export)          caud_cmd_export "${1:-}" "${2:-}" ;;
+        --html)            caud_cmd_html "${1:-}" ;;
         --selftest)        caud_selftest ;;
         --menu)            caud_menu ;;
         *)
@@ -1615,6 +1798,15 @@ Usage: $0 COMMAND
   --sqn-recover <ki> <op|opc> <material> <rand> <auts>
                                    recover the sequence number a UE conceals
                                    in AUTS on SYNCH failure (own K only)
+  --export <gen|all> [out.tsv]     the session store as a per-generation
+                                   security view: status, points and rank per
+                                   session, with `unobserved` in the
+                                   ue_declared column when the UE's
+                                   advertised set was never recorded
+  --html [out.html]                self-contained HTML report (inline style,
+                                   no script, no external asset) of the
+                                   algorithm table, the sessions and the
+                                   downgrade findings
   --selftest                       verify tables, scoring and parsing
   --menu                           interactive menu
 

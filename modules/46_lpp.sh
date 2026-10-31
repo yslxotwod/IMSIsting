@@ -55,6 +55,9 @@
 #                   [--muting po2|po4|po8|po16:BITS|none]
 #                   [--nbr PCI:RSTD:UNC[:CP][:PRS-BW:PRS-IDX:numDL-FRAMES],...]
 #                   [--initiator ...] [--transaction N]
+#   --otdoa-plan    the ordered exchange: assistance data, PRS occasions,
+#                   the measurement request, and what each step yields
+#   --otdoa-forge   same encoder as --otdoa-assist, named for the row it fills
 #   --otdoa-request [--form measure|capabilities] [--sfn N] [--pci N]
 #                   [--earfcn N] [--ref-res N] [--ref-val N] [--ref-samples N]
 #                   [--nbr PCI:RSTD:RES:VAL[:SAMPLES],...] [--initiator ...]
@@ -2284,6 +2287,28 @@ location_type	civic	a civic address	street	a postal address, which resolves to a
 LADDER
 }
 
+# ── --otdoa-plan: the whole OTDOA exchange as an ordered plan ───────────
+# The two builders already exist and encode their IE (TS 37.355 Annex A:
+# OTDOA-ProvideAssistanceData, RequestLocationInformation with the OTDOA
+# measurement request). What was missing is the verb that says how they are
+# used together, what each step yields, and where this host stops.
+lpp_cmd_otdoa_plan() {
+    printf 'spec\tTS 37.355 Annex A\tLPP: OTDOA-ProvideAssistanceData, RequestLocationInformation\n'
+    printf 'spec\tTS 36.211 6.10.4\tPRS periodicity and subframe offset, keyed by prs-ConfigurationIndex\n'
+    printf 'spec\tTS 36.355 6.5\tOTDOA-RequestLocationInformation (the UE measurement request)\n'
+    printf 'step\t1\tbuild the assistance data (%s --otdoa-assist) so the UE knows which cells carry PRS\n' "$0"
+    printf 'step\t2\tname the occasions (%s --prs-plan) -- period, offset, muting, nID from the 36.211 table\n' "$0"
+    printf 'step\t3\tbuild the request (%s --otdoa-request --form measure) for the reference signal measurements\n' "$0"
+    printf 'step\t4\tthe UE answers otdoaSignalMeasurementInformation: every neighbour, RSTD and its uncertainty\n'
+    printf 'step\t5\tread a real answer back with --parse-position, and a forged one is named by --detect-forgery\n'
+    printf 'yields\ta list of reference-signal time differences an E-SMLC turns into a position; the values are the UE'"'"'s, not this module'"'"'s\n'
+    printf 'measured\tassistance data and request encoding, when --oracle-check runs and the pycrate oracle agrees\n'
+    printf 'unobserved\twhether a given UE measured anything: no UE is attached to this host, so no RSTD is measured here\n'
+    printf 'boundary\tthe assistance data is only meaningful to a UE in coverage of the PRS cells it names; naming a cell is not measuring it\n'
+    printf 'handoff\tno radio: this is a builder and a planner, and the exchange itself needs a UE and a position server\n'
+    printf 'verdict\totdoa_plan_stated\n'
+}
+
 lpp_cmd_lcs_ladder() {
     local rows n
     rows="$(lpp_lcs_ladder)"
@@ -2836,6 +2861,19 @@ lpp_selftest() {
     chk lcs-audit-noarg "$(lpp_cmd_lcs_audit >/dev/null 2>&1; echo $?)" 2
     chk lcs-audit-nofile "$(lpp_cmd_lcs_audit /tmp/definitely-not-here-lcs.tsv >/dev/null 2>&1; echo $?)" 1
     rm -f "$laf"
+    # OTDOA exchange plan and the forge name: the plan names its steps and its
+    # boundary, and the forge verb is the same encoder as the assist builder.
+    olp=$(lpp_cmd_otdoa_plan 2>/dev/null)
+    chk otdoa-plan-steps  "$(printf '%s\n' "$olp" | grep -c '^step')" 5
+    chk otdoa-plan-spec   "$(printf '%s\n' "$olp" | awk -F'\t' '$1=="spec"{print $2; exit}')" 'TS 37.355 Annex A'
+    chk otdoa-plan-yield  "$(printf '%s\n' "$olp" | awk -F'\t' '$1=="yields"{print ($2 ~ /time differences/)}')" 1
+    chk otdoa-plan-unobs  "$(printf '%s\n' "$olp" | awk -F'\t' '$1=="unobserved"{print ($2 ~ /no UE is attached/)}')" 1
+    chk otdoa-plan-handoff "$(printf '%s\n' "$olp" | awk -F'\t' '$1=="handoff"{print ($2 ~ /no radio/)}')" 1
+    chk otdoa-plan-verdict "$(printf '%s\n' "$olp" | awk -F'\t' '$1=="verdict"{print $2}')" otdoa_plan_stated
+    ofr=$(lpp_proc_run otdoa-assist --pci 1 --earfcn 6300 2>&1)
+    chk otdoa-forge-rc    "$(lpp_proc_run otdoa-assist --pci 1 --earfcn 6300 >/dev/null 2>&1; echo $?)" 0
+    chk otdoa-forge-is-assist "$(printf '%s\n' "$ofr" | awk -F'\t' '$1=="otdoa-assist"' | wc -l)" 1
+    chk otdoa-forge-sent      "$(printf '%s\n' "$ofr" | awk -F'\t' '$1=="otdoa-assist"{print $7}')" 0
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2862,6 +2900,8 @@ lpp_menu() {
   [13] Build a SUPL POS carrying an LPP payload
   [14] Parse a SUPL INIT / START / POS
   [15] Encode the SET session id / SET id on their own
+  [16] Plan the OTDOA exchange (assistance data -> PRS -> measurement)
+  [17] Forge OTDOA assistance data (same encoder as [7])
   [0]  back
 
 M
@@ -2925,6 +2965,14 @@ M
                 read -rp "  set id kind imsi|msisdn [imsi]> " k
                 lpp_supl_session "${s:-001A}" --set-id "${k:-imsi}"
                 read -rp "  press enter " _ ;;
+            16)
+                lpp_cmd_otdoa_plan
+                read -rp "  press enter " _ ;;
+            17)
+                read -rp "  pci> " p
+                read -rp "  earfcn> " e
+                lpp_proc_run otdoa-assist --pci "${p:-1}" --earfcn "${e:-6300}"
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2945,6 +2993,8 @@ lpp_cli_main() {
         --detect-forgery) lpp_detect_forgery "${1:-}" ;;
         --otdoa-assist)  lpp_otdoa_assist "$@" ;;
         --otdoa-request) lpp_otdoa_request "$@" ;;
+        --otdoa-plan)   lpp_cmd_otdoa_plan ;;
+        --otdoa-forge)  lpp_proc_run otdoa-assist "$@" ;;
         --utdoa-config)  lpp_utdoa_config "$@" ;;
         --utdoa-build)   lpp_utdoa_build "$@" ;;
         --prs-plan)      lpp_prs_plan "$@" ;;

@@ -5758,6 +5758,77 @@ print(hmac.new(key, bytes([0x6a]) + p + (len(p) * 8).to_bytes(2, "big"), hashlib
     chk sgp32-replay-nofil "$(sim_sgp32_replay "$s32d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
     rm -rf "$s32d"
 
+    # ── SCP03 handshake audit (GPC Amendment D 6.2) ──────────────────────
+    # The card cryptogram is the proof: the key set below reproduces the
+    # published SCP03t vector's card cryptogram, so `keys measured` is a real
+    # statement about those keys, not a restatement of the input.
+    local s3d old_simdir="$SIM_DIR" s3a resp58
+    s3d=$(mktemp -d)
+    SIM_DIR="$s3d/loot/sim"; mkdir -p "$SIM_DIR"
+    resp58="001122334455667788990003008899AABBCCDDEEFFD71A889EFCF709E8"
+    s3a=$(sim_scp03_audit 2>/dev/null); chk scp03-audit-handoff-rc "$?" 3
+    chk scp03-audit-transmitted "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="transmitted"{print $2}')" "no"
+    chk scp03-audit-init-apdu   "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="init-update-apdu"{print $2}')" \
+        "8050000008000102030405060700"
+    chk scp03-audit-verdict-hoff "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="verdict"{print $2}')" "handoff"
+    chk scp03-audit-cmac-unobs  "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="c-mac"{print $2}')" "unobserved"
+    chk scp03-audit-levels      "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="sec-level"{c++} END{print c+0}')" "4"
+    chk scp03-audit-level33     "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="sec-level" && $2=="33"{print ($3 ~ /R-ENCRYPTION/)}')" "1"
+    s3a=$(sim_scp03_audit --response "$resp58" \
+            --k-enc 000102030405060708090A0B0C0D0E0F \
+            --k-mac 101112131415161718191A1B1C1D1E1F \
+            --host-challenge 0011223344556677 2>/dev/null)
+    chk scp03-audit-scp        "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="scp"{print $2}')" "03"
+    chk scp03-audit-kvn        "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="key-version"{print $2}')" "00"
+    chk scp03-audit-iparam     "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="i-parameter"{print $2}')" "00"
+    chk scp03-audit-cgram      "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="card-cryptogram"{print $2}')" "D71A889EFCF709E8"
+    chk scp03-audit-candidate  "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="candidate-card-cryptogram"{print $2}')" "D71A889EFCF709E8"
+    chk scp03-audit-keys       "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="keys"{print $2}')" "measured"
+    chk scp03-audit-verdict    "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="verdict"{print $2}')" "scp03_state_read"
+    chk scp03-audit-accepted   "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="sec-level-accepted"{print $2}')" "unobserved"
+    # A key set that does not reproduce the card cryptogram is refused, and the
+    # refusal is the finding: those are not this card's keys.
+    sim_scp03_audit --response "$resp58" --k-enc 00000000000000000000000000000000 \
+        --k-mac 101112131415161718191A1B1C1D1E1F >/dev/null 2>&1
+    chk scp03-audit-wrong-keys-rc "$?" 1
+    chk scp03-audit-wrong-keys "$(sim_scp03_audit --response "$resp58" \
+            --k-enc 00000000000000000000000000000000 \
+            --k-mac 101112131415161718191A1B1C1D1E1F 2>/dev/null \
+            | awk -F'\t' '$1=="keys"{print $2}')" "refused"
+    # 29 and 32 octet responses are both legal; 28 is not.
+    chk scp03-audit-resp29     "$(sim_scp03_audit --response "$resp58" >/dev/null 2>&1; echo $?)" 0
+    chk scp03-audit-resp32     "$(sim_scp03_audit --response "${resp58}000102" >/dev/null 2>&1; echo $?)" 0
+    chk scp03-audit-resp-bad   "$(sim_scp03_audit --response 0011 >/dev/null 2>&1; echo $?)" 2
+    chk scp03-audit-resp-seq   "$(sim_scp03_audit --response "${resp58}000102" 2>/dev/null \
+            | awk -F'\t' '$1=="sequence-counter"{print $2}')" "000102"
+    # An SCP02 card is not an SCP03 card: the audit says so instead of reading
+    # its fields as if they were SCP03's.
+    chk scp03-audit-scp02-rc   "$(sim_scp03_audit --response 001122334455667788990002008899AABBCCDDEEFFD71A889EFCF709E8 >/dev/null 2>&1; echo $?)" 1
+    chk scp03-audit-scp02-verd "$(sim_scp03_audit --response 001122334455667788990002008899AABBCCDDEEFFD71A889EFCF709E8 2>/dev/null \
+            | awk -F'\t' '$1=="verdict"{print $2}')" "not_scp03"
+    chk scp03-audit-enc-only   "$(sim_scp03_audit --k-enc 000102030405060708090A0B0C0D0E0F >/dev/null 2>&1; echo $?)" 2
+    chk scp03-audit-bad-aid    "$(sim_scp03_audit --aid 0011 >/dev/null 2>&1; echo $?)" 2
+    chk scp03-audit-bad-kvn    "$(sim_scp03_audit --kvn 0 >/dev/null 2>&1; echo $?)" 2
+    # The accepted level is only ever what a card answered.
+    printf 'sec-level\tsw\n33\t9000\n13\t6982\n01\t9000\n' > "$s3d/obs.tsv"
+    s3a=$(sim_scp03_audit --response "$resp58" --k-enc 000102030405060708090A0B0C0D0E0F \
+            --k-mac 101112131415161718191A1B1C1D1E1F --observed "$s3d/obs.tsv" 2>/dev/null)
+    chk scp03-audit-obs-33     "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="sec-level-observed" && $2=="33"{print $4}')" "accepted"
+    chk scp03-audit-obs-13     "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="sec-level-observed" && $2=="13"{print $4}')" "refused"
+    chk scp03-audit-obs-count  "$(printf '%s\n' "$s3a" | awk -F'\t' '$1=="sec-level-observed"{c++} END{print c+0}')" "3"
+    chk scp03-audit-obs-missing "$(sim_scp03_audit --observed "$s3d/none.tsv" >/dev/null 2>&1; echo $?)" 1
+    chk scp03-audit-store      "$([[ -s "$SIM_DIR/scp03_audit.tsv" ]] && echo yes || echo no)" "yes"
+    chk scp03-audit-store-rows "$(awk -F'\t' '$2=="scp03-audit"{c++} END{print (c>=4)?"yes":"no"}' "$SIM_DIR/scp03_audit.tsv")" "yes"
+    # The known vector's host cryptogram is the other half of the handshake:
+    # the tool that derives it must be the same derivation the audit reports.
+    chk scp03-audit-hcgram     "$(python3 "$IMSISTING_ROOT/tools/scp03t.py" --derive \
+            --k-enc 000102030405060708090A0B0C0D0E0F \
+            --k-mac 101112131415161718191A1B1C1D1E1F \
+            --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF \
+            --kvn 00 2>/dev/null | awk -F'\t' '$1=="host_cryptogram"{print $2}')" "75A94E14D36602F1"
+    SIM_DIR="$old_simdir"
+    rm -rf "$s3d"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -5797,6 +5868,7 @@ sim_menu() {
   [n]  walk a Bound Profile Package TLV by TLV
   [o]  parse an ES9+ response body
   [p]  parse an ES9+ HandleNotification (6.5.2.9)
+  [q]  audit an SCP03 secure-channel handshake (keys + security level)
   [0]  back
 
 M
@@ -5887,6 +5959,15 @@ M
                read -rp "  press enter " _ ;;
             p) read -rp "  HandleNotification JSON> " p
                sim_cmd_es9_notification "$p" | column -t -s$'\t' 2>/dev/null || sim_cmd_es9_notification "$p"
+               read -rp "  press enter " _ ;;
+            q) read -rp "  card INITIALIZE UPDATE response hex (blank=none)> " p
+               read -rp "  K-ENC (32 hex, blank=none)> " q
+               if [[ -n "$q" ]]; then
+                   read -rp "  K-MAC (32 hex)> " r
+                   sim_scp03_audit --response "$p" --k-enc "$q" --k-mac "$r" | column -t -s$'\t' 2>/dev/null || sim_scp03_audit --response "$p" --k-enc "$q" --k-mac "$r"
+               else
+                   sim_scp03_audit ${p:+--response "$p"} | column -t -s$'\t' 2>/dev/null || sim_scp03_audit ${p:+--response "$p"}
+               fi
                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -7463,6 +7544,183 @@ sim_sgp32_replay() {   # <ops.tsv>
     printf 'ref\tGSMA SGP.32 v1.3 (ES10b local operations)\n'
 }
 
+# ── --scp03-audit: the GlobalPlatform SCP03 handshake, over the OTA/APDU path
+# GPC Card Spec v2.3 Amendment D 6.2: INITIALIZE UPDATE (CLA '80', INS '50')
+# opens the session and answers the card's key version, SCP id, i parameter,
+# card challenge and card cryptogram; EXTERNAL AUTHENTICATE (CLA '84', INS
+# '82') then names a security level and carries the host cryptogram and a
+# C-MAC. The two cryptograms ARE the authentication: a candidate key set is the
+# card's exactly when it reproduces the card cryptogram, and a security level is
+# accepted only when the card answers '9000' to it -- so the first is measured
+# from a response, and the second only from an observed answer. Nothing is sent:
+# a live probe needs a card on a reader, and that is the handoff.
+sim_scp03_audit() {
+    local aid='A000000151000000' kvn='00' kenc='' kmac='' hc='0001020304050607'
+    local resp='' obs='' sec=''
+    local store="$SIM_DIR/scp03_audit.tsv"
+    while (($#)); do
+        case "$1" in
+            --aid)            aid="${2:-}"; shift 2 ;;
+            --kvn)            kvn="${2:-}"; shift 2 ;;
+            --k-enc)          kenc="${2:-}"; shift 2 ;;
+            --k-mac)          kmac="${2:-}"; shift 2 ;;
+            --host-challenge) hc="${2:-}"; shift 2 ;;
+            --response)       resp="${2:-}"; shift 2 ;;
+            --observed)       obs="${2:-}"; shift 2 ;;
+            --sec-level)      sec="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunsupported flag %s for --scp03-audit\n' "$(sim_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    sim_is_hex "$aid" || { printf 'ERROR\t--aid is hex (the card AID, even number of digits)\n' >&2; return 2; }
+    [[ "$aid" =~ ^[0-9a-fA-F]{16}$ ]] || { printf 'ERROR\t--aid is 8 octets: the ISD AID is A000000151000000 (GPC Card Spec 6.3.1)\n' >&2; return 2; }
+    [[ "$kvn" =~ ^[0-9a-fA-F]{2}$ ]] || { printf 'ERROR\t--kvn is one octet of hex\n' >&2; return 2; }
+    [[ "$hc" =~ ^[0-9a-fA-F]{16}$ ]] || { printf 'ERROR\t--host-challenge is 8 octets of hex (GPC Amendment D 6.2.2)\n' >&2; return 2; }
+    aid="$(printf '%s' "$aid" | tr 'a-f' 'A-F')"; kvn="$(printf '%s' "$kvn" | tr 'a-f' 'A-F')"
+    hc="$(printf '%s' "$hc" | tr 'a-f' 'A-F')"
+    [[ -z "$kenc" || "$kenc" =~ ^[0-9a-fA-F]{32}$ ]] || { printf 'ERROR\t--k-enc is 16 octets of hex\n' >&2; return 2; }
+    [[ -z "$kmac" || "$kmac" =~ ^[0-9a-fA-F]{32}$ ]] || { printf 'ERROR\t--k-mac is 16 octets of hex\n' >&2; return 2; }
+    if [[ -n "$kenc" && -z "$kmac" ]]; then
+        printf 'ERROR\t--k-enc needs --k-mac: the SCP03 KDF derives S-ENC and S-MAC from both static keys (SGP.02 4.1.3.3; GPC Amendment D Annex D 4.1.5)\n' >&2
+        return 2
+    fi
+    [[ -z "$sec" || "$sec" =~ ^[0-9a-fA-F]{2}$ ]] || { printf 'ERROR\t--sec-level is one octet of hex\n' >&2; return 2; }
+
+    printf 'protocol\tSCP03\tGPC Card Spec v2.3 Amendment D 6.2 (secure channel), 11.1.5 (security level)\n'
+    printf 'path\tAPDU\tISO 7816 command/response; the OTA path carries the same APDUs inside TS 23.048 envelopes\n'
+    printf 'aid\t%s\n' "$aid"
+    printf 'aid-ref\tGPC Card Spec 6.3.1: the ISD AID is A0000001 5100 0000\n'
+    printf 'kvn\t%s\tcandidate key version, P1 of INITIALIZE UPDATE\n' "$kvn"
+    printf 'host-challenge\t%s\t%s\n' "$hc" \
+        "$([[ "$hc" == '0001020304050607' ]] && echo 'fixed default so a run is reproducible; override with --host-challenge' || echo 'supplied')"
+    # 6.2.2 command APDU: CLA 80, INS 50, P1 key version, P2 00, Lc 08, the
+    # host challenge, Le 00.
+    printf 'init-update-apdu\t8050%s0008%s00\n' "$kvn" "$hc"
+    printf 'init-update-ref\tGPC Amendment D 6.2.2: CLA 80 INS 50 P1 key version P2 00 Lc 08, Le 00\n'
+    printf 'external-authenticate-apdu\t8482<sec-level>0010<host-cryptogram-8><c-mac-8>\n'
+    printf 'external-authenticate-ref\tGPC Amendment D 6.2.3: CLA 84 INS 82 P1 SECURITY LEVEL P2 00 Lc 10\n'
+    printf 'c-mac\tunobserved\tGPC Amendment D 6.2.4 generates the C-MAC of a command APDU; tools/scp03t.py implements the SCP03t TLV profile (84/85/86) instead, so this builder leaves the 8 C-MAC octets blank rather than guess a chaining rule\n'
+
+    local keys='unobserved'
+    local card_cg=''
+    if [[ -n "$resp" ]]; then
+        sim_is_hex "$resp" || { printf 'ERROR\t--response is hex\n' >&2; return 2; }
+        resp="$(printf '%s' "$resp" | tr 'a-f' 'A-F')"
+        local n=$(( ${#resp} / 2 ))
+        if [[ $n -ne 29 && $n -ne 32 ]]; then
+            printf 'ERROR\t--response is %d octets; the INITIALIZE UPDATE response is 29 (10 div + 3 key info + 8 card challenge + 8 card cryptogram) or 32 with a 3-octet sequence counter (GPC Amendment D 6.2.2)\n' "$n" >&2
+            return 2
+        fi
+        local div="${resp:0:20}" kvi="${resp:20:6}" cc="${resp:26:16}" cg="${resp:42:16}" seq=''
+        [[ $n -eq 32 ]] && seq="${resp:58:6}"
+        local rkvn="${kvi:0:2}" rscp="${kvi:2:2}" ri="${kvi:4:2}"
+        printf 'response-octets\t%d\n' "$n"
+        printf 'div-data\t%s\tthe key diversification data (10 octets)\n' "$div"
+        printf 'key-version\t%s\n' "$rkvn"
+        printf 'scp\t%s\t%s\n' "$rscp" \
+            "$([[ "$rscp" == '03' ]] && echo 'measured: SCP03, the protocol this verb audits' || echo 'unobserved: not SCP03, so this audit does not apply')"
+        case "$ri" in
+            00) printf 'i-parameter\t00\tsequence counter supported (GPC Amendment D 6.2.2)\n' ;;
+            80) printf 'i-parameter\t80\tpseudo-random card challenge (GPC Amendment D 6.2.2)\n' ;;
+            *)  printf 'i-parameter\t%s\tunobserved: neither 00 nor 80, and this module names only those two\n' "$ri" ;;
+        esac
+        printf 'card-challenge\t%s\n' "$cc"
+        printf 'card-cryptogram\t%s\tthe card'"'"'s proof that it holds K-ENC and K-MAC\n' "$cg"
+        [[ -n "$seq" ]] && printf 'sequence-counter\t%s\tthe 3 trailing octets (GPC Amendment D 6.2.2)\n' "$seq"
+        if [[ "$rscp" != '03' ]]; then
+            printf 'verdict\tnot_scp03\n'
+            mkdir -p "$SIM_DIR" 2>/dev/null && printf '%s\tscp03-audit\tnot_scp03\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rscp" >> "$store" 2>/dev/null
+            return 1
+        fi
+        card_cg="$cg"
+        if [[ -n "$kenc" && -n "$kmac" ]]; then
+            local tool="$IMSISTING_ROOT/tools/scp03t.py" der
+            if [[ ! -f "$tool" ]]; then
+                printf 'ERROR\ttools/scp03t.py is missing, so the candidate keys cannot be tried\n' >&2
+                return 1
+            fi
+            command -v python3 >/dev/null 2>&1 || { printf 'ERROR\tpython3 is required to derive the session keys\n' >&2; return 1; }
+            der="$(python3 "$tool" --derive --k-enc "$kenc" --k-mac "$kmac" \
+                    --host-challenge "$hc" --card-challenge "$cc" --kvn "${rkvn}" 2>/dev/null)"
+            if [[ -z "$der" ]]; then
+                printf 'ERROR\ttools/scp03t.py could not derive the session keys from this key material\n' >&2
+                return 1
+            fi
+            local dcgram
+            dcgram="$(printf '%s\n' "$der" | awk -F'\t' '$1=="card_cryptogram"{print $2}')"
+            printf 'candidate-card-cryptogram\t%s\tthe card cryptogram these keys predict\n' "$dcgram"
+            if [[ "$(printf '%s' "$dcgram" | tr 'a-f' 'A-F')" == "$card_cg" ]]; then
+                keys='measured'
+                printf 'keys\tmeasured\tthis candidate key set reproduces the card cryptogram, so the card holds it\n'
+            else
+                keys='refused'
+                printf 'keys\trefused\tthe card cryptogram does not follow from these keys, so this is not the card'"'"'s key set\n'
+            fi
+        else
+            printf 'keys\tunobserved\t--k-enc and --k-mac were not given, so no candidate was tried against the card cryptogram\n'
+        fi
+    else
+        printf 'response\tunobserved\tno --response given: the card cryptogram is what proves the keys, and no card is on a reader here\n'
+        printf 'keys\tunobserved\tno candidate keys and no response to try them against\n'
+    fi
+
+    # 11.1.5: the security-level byte. The four levels this module names, and
+    # the capabilities each one asks for. A level this module does not name is
+    # not guessed at.
+    printf 'sec-level\t01\tC-MAC only\tGPC Card Spec 11.1.5\n'
+    printf 'sec-level\t03\tC-MAC + C-DECRYPTION\tGPC Card Spec 11.1.5\n'
+    printf 'sec-level\t13\tC-MAC + C-DECRYPTION + R-MAC\tGPC Card Spec 11.1.5\n'
+    printf 'sec-level\t33\tC-DECRYPTION + C-MAC + R-MAC + R-ENCRYPTION\tGPC Card Spec 11.1.5; the level SCP03t requires (SGP.02 4.1.3.3)\n'
+    if [[ -n "$sec" ]]; then
+        sec="$(printf '%s' "$sec" | tr 'a-f' 'A-F')"
+        case "$sec" in
+            01|03|13|33) printf 'sec-level-asked\t%s\n' "$sec" ;;
+            *) printf 'sec-level-asked\t%s\tunobserved: not one of the four levels named above\n' "$sec" ;;
+        esac
+    fi
+    local accepted=0
+    if [[ -n "$obs" ]]; then
+        if [[ ! -r "$obs" ]]; then printf 'ERROR\t--observed names an unreadable file: %s\n' "$(sim_sanitize "$obs")" >&2; return 1; fi
+        # The observed file is one row per EXTERNAL AUTHENTICATE a card answered:
+        #   <security-level octet>\t<status word>
+        # with an optional free-text column after it.
+        local lvl sw verdict
+        while IFS=$'\t' read -r lvl sw _; do
+            [[ -z "$lvl" ]] && continue
+            [[ "$lvl" == sec-level* && "$sw" == sw* ]] && continue
+            sw="$(printf '%s' "${sw^^}" | tr -d ' ')"
+            if [[ "$sw" == '9000' ]]; then
+                verdict=accepted; accepted=$(( accepted + 1 ))
+            else
+                verdict=refused
+            fi
+            printf 'sec-level-observed\t%s\t%s\t%s\n' "$lvl" "$sw" "$verdict"
+        done < "$obs"
+        if [[ $accepted -eq 0 ]]; then
+            printf 'sec-level-accepted\tunobserved\tthe observed transcript has no 9000 answer to any level byte\n'
+        fi
+    else
+        printf 'sec-level-accepted\tunobserved\tno observed transcript: the level a card accepts is what the card answers, and no card answered here\n'
+    fi
+    printf 'transmitted\tno\tthis verb builds APDUs and reads a supplied response; it opens no reader\n'
+    mkdir -p "$SIM_DIR" 2>/dev/null && printf '%s\tscp03-audit\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${card_cg:-no-response}" "$keys" "${sec:-none}" \
+        >> "$store" 2>/dev/null
+    if [[ -z "$resp" ]]; then
+        printf 'verdict\thandoff\tthe handshake needs a card: INITIALIZE UPDATE and EXTERNAL AUTHENTICATE on a reader, which this host does not have\n'
+        printf 'handoff\trun the two APDUs above against the card and feed the response back with --response\n'
+        printf 'ref\tGPC Card Spec v2.3 Amendment D 6.2; SGP.02 4.1.3.3; GPC Card Spec 11.1.5\n'
+        return 3
+    fi
+    if [[ "$keys" == 'refused' ]]; then
+        printf 'verdict\tkeys_refused\n'
+        printf 'ref\tGPC Card Spec v2.3 Amendment D 6.2; SGP.02 4.1.3.3\n'
+        return 1
+    fi
+    printf 'verdict\tscp03_state_read\n'
+    printf 'ref\tGPC Card Spec v2.3 Amendment D 6.2; SGP.02 4.1.3.3; GPC Card Spec 11.1.5\n'
+    return 0
+}
+
 sim_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -7511,6 +7769,7 @@ sim_cli_main() {
         --usim-tcp)       sim_cmd_usim_tcp "$@" ;;
         --es9-plus)       sim_cmd_es9_plus "$@" ;;
         --es8-scp03t)     sim_cmd_es8_scp03t "$@" ;;
+        --scp03-audit)    sim_scp03_audit "$@" ;;
         --es8-build)      sim_cmd_es8_build "$@" ;;
         --es8-parse)      sim_cmd_es8_parse "${1:-}" ;;
         --es9-response)   sim_cmd_es9_response "$@" ;;
@@ -7597,6 +7856,13 @@ Usage: $0 COMMAND
                                     --card-challenge <16hex> [--payload <hex>]
                                     the SCP03t command TLVs (84/85/86): session keys,
                                     cryptograms and the encrypted package segments
+  --scp03-audit [--aid <16hex>] [--kvn <2hex>] [--k-enc <32hex> --k-mac <32hex>]
+                [--host-challenge <16hex>] [--response <58|64 hex>]
+                [--sec-level <2hex>] [--observed <tsv>]
+                                    the SCP03 handshake: build INITIALIZE UPDATE /
+                                    EXTERNAL AUTHENTICATE, read a card's response,
+                                    say which keys it holds and which security
+                                    level was observed accepted (GPC Amd D 6.2)
   --es9-response <op> <json>        parse an ES9+ response body (6.5.1.4 header + 6.5.2.x fields)
   --es9-notification <json>         parse ES9+.HandleNotification (6.5.2.9) and the ASN.1 it carries
   --plan <ota-replay|sat-wib|esim-download|apdu-live|dpa-lab>

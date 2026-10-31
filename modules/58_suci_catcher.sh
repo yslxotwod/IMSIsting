@@ -1005,7 +1005,7 @@ sc_classify_capture() {  # <pcap>
         printf 'suci[%s]\tframe=%s scheme=%s curve=%s key_id=%s ri=%s operator=not-in-suci\n' \
             "$n" "$frame" "${scheme:-?}" "$(sc_curve_for_scheme "${scheme:-}")" \
             "${pki:-?}" "${ri:-0000}" >> "$raw.sorted"
-    done < "$raw"
+    done < "$norm"
     cat "$raw.sorted"
     printf 'capture\t%s\n' "$(sc_sanitize "$pcap")"
     printf 'records\t%s\n' "$n"
@@ -1153,6 +1153,7 @@ sc_status() {
     command -v tshark >/dev/null 2>&1 && ts=$(tshark -v 2>/dev/null | head -1 | tr -d '\r')
     printf 'module\t58_suci_catcher\n'
     printf 'capability\tlive-5g-suci-capture\n'
+    printf 'ims_catch\t--ims-catch <build|read|plan>  (SIP REGISTER + 401/407 disclosure; reads with tshark)\n'
     printf 'lane\tlive\n'
     printf 'gnb\t%s\n' "$gnb"
     printf 'core\t%s\n' "$core"
@@ -1180,6 +1181,286 @@ sc_status() {
 # ── selftest ───────────────────────────────────────────────────────────
 # Every expected value is derived by hand below, before the function that
 # produces it runs, so a drift in the codec is a failure and not a diff.
+# ── --ims-catch: the IMS half of the catcher ───────────────────────────
+# A 5G catcher as this module builds it stops at the NAS identity exchange: the
+# SUCI comes back concealed and only the home network can open it. The IMS half
+# is different, and it is why an IMS registration is worth catching at all: a
+# handset that has camped on the cell and been given an IMS APN sends a SIP
+# REGISTER to the P-CSCF it is told about, and that REGISTER carries the private
+# identity in cleartext --
+#
+#   Authorization: Digest username="<IMPI>@ims.mnc001.mcc001.3gppnetwork.org", ...
+#   From: <sip:<IMPU>@ims.mnc001.mcc001.3gppnetwork.org>;tag=...
+#
+# TS 23.003 13.2 puts the IMPI in NAI form, `<IMSI>@ims.mnc<MNC>.mcc<MCC>.
+# 3gppnetwork.org`, so the username field is the IMSI itself, before any
+# concealment is asked for. The challenge (401 WWW-Authenticate, or 407
+# Proxy-Authenticate through a P-CSCF, RFC 3261 10.2 / 22.1 and RFC 3310) then
+# tells the catcher which realm, nonce and algorithm the network wants, which is
+# the other half of what a registration discloses.
+#
+# What this verb does, and what it refuses:
+#   build   writes the REGISTER a handset sends, and -- when a RES is supplied --
+#           the Authorization header that answers a challenge (RFC 2617 3.2.2
+#           for the digest arithmetic, RFC 3310 3.2 for "the password is the AKA
+#           RES"). Nothing is transmitted: the header block goes to stdout and a
+#           file, and --plan says so.
+#   read    reads a capture with tshark's SIP dissector and records, per
+#           message, the IMPI, the IMPU, the realm, nonce, algorithm and QOP,
+#           the cell identity the handset advertised, and its address.
+#   plan    the sequence, and where it hands off (a UE has to be camped first).
+#
+# Doctrine: a value read out of a capture is `measured`; an expiry, a realm or a
+# cell id a handset writes about itself is `advertised`; a field the capture did
+# not carry is `unobserved` and is named as such, never defaulted.
+sc_ims_realm() {  # <plmn> -> ims.mnc001.mcc001.3gppnetwork.org
+    local plmn="${1:-00101}" mcc mnc
+    mcc="${plmn:0:3}"; mnc="${plmn:3}"
+    # TS 23.003 13.2: the IMPI realm is ims.mnc<MNC>.mcc<MCC>.3gppnetwork.org;
+    # the MNC is zero-padded to three digits, the same way sc_snn does it.
+    printf 'ims.mnc%s.mcc%s.3gppnetwork.org' "$(printf '%03d' "$mnc")" "$mcc"
+}
+
+# RFC 2617 3.2.2 digest, with the AKA RES as the password (RFC 3310 3.2).
+# MD5 is used because AKAv1-MD5 is what an IMS core asks for; the digest is
+# printed with its A1 so a reader can recompute it instead of trusting it.
+sc_ims_digest() {  # <impi> <realm> <res-hex> <nonce> <uri> <cnonce> <nc> <qop>
+    local impi="$1" realm="$2" res_hex="$3" nonce="$4" uri="$5" cnonce="$6" nc="$7" qop="$8"
+    command -v openssl >/dev/null 2>&1 || {
+        printf 'ERROR\topenssl is required for the AKAv1-MD5 digest (no hand-rolled MD5 here)\n' >&2
+        return 1; }
+    local pw a1 ha1 a2 ha2 resp
+    pw=$(printf '%s' "$res_hex" | xxd -r -p 2>/dev/null | base64 -w0)
+    a1="$impi:$realm:$pw"
+    ha1=$(printf '%s' "$a1" | openssl dgst -md5 -r | cut -d' ' -f1)
+    a2="REGISTER:$uri"
+    ha2=$(printf '%s' "$a2" | openssl dgst -md5 -r | cut -d' ' -f1)
+    resp=$(printf '%s:%s:%s:%s:%s:%s' "$ha1" "$nonce" "$nc" "$cnonce" "$qop" "$ha2" \
+        | openssl dgst -md5 -r | cut -d' ' -f1)
+    printf 'password_form\tbase64(RES) per RFC 4648 4 — the form RFC 3310 3.2 names\n'
+    printf 'a1\t%s\n' "$a1"
+    printf 'ha1\t%s\n' "$ha1"
+    printf 'a2\t%s\n' "$a2"
+    printf 'ha2\t%s\n' "$ha2"
+    printf 'response\t%s\n' "$resp"
+}
+
+sc_ims_build() {  # <impi> <impu> [flags]
+    local impi="${1:-}" impu="${2:-}"
+    [[ -n "$impi" && -n "$impu" ]] || {
+        printf 'ERROR\tusage: --ims-catch build <impi> <impu> [--pcscf <host>] [--ue-ip <ip>] [--expires <s>] [--pani <cell-id>] [--plmn <plmn>] [--nonce <s>] [--res <hex>] [--nc <n>] [--cnonce <s>] [--qop <s>] [--out <file>]\n' >&2
+        return 2; }
+    local plmn='00101' pcscf='' ue_ip='192.0.2.10' expires='600000' pani=''
+    local nonce='' res='' nc='00000001' cnonce='' qop='auth' out=''
+    (($# >= 2)) && shift 2
+    while (($#)); do
+        case "$1" in
+            --pcscf)   pcscf="${2:-}"; shift 2 ;;
+            --ue-ip)   ue_ip="${2:-}"; shift 2 ;;
+            --expires) expires="${2:-}"; shift 2 ;;
+            --pani)    pani="${2:-}"; shift 2 ;;
+            --plmn)    plmn="${2:-}"; shift 2 ;;
+            --nonce)   nonce="${2:-}"; shift 2 ;;
+            --res)     res="${2:-}"; shift 2 ;;
+            --nc)      nc="${2:-}"; shift 2 ;;
+            --cnonce)  cnonce="${2:-}"; shift 2 ;;
+            --qop)     qop="${2:-}"; shift 2 ;;
+            --out)     out="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown flag %s\n' "$(sc_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local realm; realm=$(sc_ims_realm "$plmn")
+    [[ -n "$pcscf" ]] || pcscf="sip:$realm"
+    [[ "$expires" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--expires is delta-seconds (RFC 3261 20.19)\n' >&2; return 2; }
+    impi=$(sc_sanitize "$impi"); impu=$(sc_sanitize "$impu")
+    ue_ip=$(sc_sanitize "$ue_ip")
+
+    local tag callid branch cseq from_uri to_uri
+    tag=$(printf '%08x' "$(( (RANDOM << 16 ^ RANDOM) & 0xFFFFFFFF ))")
+    callid="$(printf '%08x' "$(( (RANDOM << 16 ^ RANDOM) & 0xFFFFFFFF ))")@${ue_ip}"
+    # RFC 3261 8.1.1.7: the branch starts with the magic cookie z9hG4bK.
+    branch="z9hG4bK$(printf '%08x' "$(( (RANDOM << 16 ^ RANDOM) & 0xFFFFFFFF ))")"
+    cseq='1'
+    from_uri="sip:${impu}"
+    to_uri="sip:${impu}"
+
+    local -a hdr=()
+    hdr+=("REGISTER sip:${realm} SIP/2.0")
+    hdr+=("Via: SIP/2.0/UDP ${ue_ip};branch=${branch};rport")
+    hdr+=("Max-Forwards: 70")
+    hdr+=("From: <${from_uri}>;tag=${tag}")
+    hdr+=("To: <${to_uri}>")
+    hdr+=("Call-ID: ${callid}")
+    hdr+=("CSeq: ${cseq} REGISTER")
+    hdr+=("Contact: <sip:${impu}@${ue_ip}>;expires=${expires}")
+    hdr+=("Expires: ${expires}")
+    [[ -n "$pani" ]] && hdr+=("P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=$(sc_sanitize "$pani")")
+    if [[ -n "$res" ]]; then
+        [[ -n "$nonce" ]] || { printf 'ERROR\t--res needs the --nonce the challenge carried\n' >&2; return 2; }
+        [[ -n "$cnonce" ]] || cnonce=$(printf '%016x' "$(( (RANDOM << 16 ^ RANDOM) & 0xFFFFFFFFFFFFFFFF ))")
+        local dg dgr
+        dg=$(sc_ims_digest "$impi" "$realm" "$res" "$nonce" "sip:${realm}" "$cnonce" "$nc" "$qop") || return 2
+        dgr=$(printf '%s\n' "$dg" | awk -F'\t' '$1=="response"{print $2}')
+        hdr+=("Authorization: Digest username=\"${impi}\", realm=\"${realm}\", nonce=\"${nonce}\", uri=\"sip:${realm}\", response=\"${dgr}\", algorithm=AKAv1-MD5, qop=${qop}, nc=${nc}, cnonce=\"${cnonce}\"")
+        printf '%s\n' "$dg"
+    else
+        printf 'authorization\tunobserved\tno --res supplied: this REGISTER is the first one, before any challenge, and a first REGISTER carries no Authorization header (RFC 3261 22.1)\n'
+    fi
+    hdr+=("Content-Length: 0")
+    printf 'request_line\t%s\n' "$(sc_sanitize "${hdr[0]}")"
+    printf 'realm\t%s\n' "$realm"
+    printf 'destination\t%s\tinferred\tthe REGISTER would go to the P-CSCF at this address (TS 24.229 5.1.1: the P-CSCF is discovered, not configured); nothing is sent\n' "$(sc_sanitize "$pcscf")" 
+    printf 'impi\t%s\tadvertised\tTS 23.003 13.2 NAI form: the IMPI is the IMSI, in cleartext\n' "$impi"
+    printf 'impu\t%s\tadvertised\tRFC 3261 8.1.1.3 From URI\n' "$impu"
+    printf 'expiry\t%s\tadvertised\tthe value the handset claims; an Expires is delta-seconds (RFC 3261 20.19)\n' "$expires"
+    if [[ -n "$pani" ]]; then
+        printf 'pani\t%s\tadvertised\tthe cell the handset says it is on (RFC 3455 4.4 header; the 3GPP cell-id parameter is defined by TS 24.229)\n' "$(sc_sanitize "$pani")"
+    else
+        printf 'pani\tunobserved\tno --pani supplied; a catcher normally advertises the cell it is running\n'
+    fi
+
+    # RFC 3261 7: the header block ends with an empty line, so the last header
+    # is followed by CRLF CRLF, not by one CRLF. printf -v is used rather than
+    # $(...) because command substitution eats the trailing newline and would
+    # leave a bare CR on the end of the message.
+    local msg
+    printf -v msg '%s\r\n' "${hdr[@]}"
+    msg+=$'\r\n'
+    printf '%s' "$msg"
+    if [[ -n "$out" ]]; then
+        printf '%s' "$msg" > "$out" || { printf 'ERROR\tcannot write %s\n' "$(sc_sanitize "$out")" >&2; return 1; }
+        printf 'written\t%s\n' "$(sc_sanitize "$out")"
+    fi
+    printf 'transmitted\tno\n'
+    printf 'ref\tRFC 3261 8.1.1 / 20.19 / 22.1; RFC 3261 10.2 (401) and 22.1 (407 through a proxy); RFC 3310 3.2 (AKA as the digest password); TS 23.003 13.2 (IMPI)\n'
+    return 0
+}
+
+sc_ims_read() {  # <pcap>
+    local pcap="${1:-}"
+    [[ -n "$pcap" ]] || { printf 'ERROR\tusage: --ims-catch read <pcap>\n' >&2; return 2; }
+    [[ -f "$pcap" && -r "$pcap" ]] || {
+        printf 'ERROR\tcapture is not a readable file: %s\n' "$(sc_sanitize "$pcap")" >&2; return 1; }
+    local ts; ts=$(command -v tshark 2>/dev/null) || {
+        printf 'ERROR\ttshark is required to read IMS traffic (it owns the SIP dissector)\n' >&2
+        printf 'WHY\ta second SIP parser here would drift from the one the rest of the tree referees against\n' >&2
+        return 1; }
+    sc_init_dirs
+    local raw="$SC_CAP/ims_$(basename "${pcap%.*}").tsv"
+    "$ts" -r "$pcap" -Y 'sip' -T fields \
+        -e frame.number -e ip.src -e sip.Method -e sip.Status-Code \
+        -e sip.auth.username -e sip.from.user -e sip.to.user -e sip.auth.realm \
+        -e sip.auth.nonce -e sip.auth.algorithm -e sip.auth.qop \
+        -e sip.P-Access-Network-Info.utran-cell-id-3gpp -e sip.Contact -e sip.Expires \
+        > "$raw" 2>"$raw.err" || {
+        printf 'ERROR\ttshark could not read the capture: %s\n' \
+            "$(sc_sanitize "$(head -1 "$raw.err" 2>/dev/null)")" >&2
+        return 1
+    }
+    # tshark prints an absent field as nothing at all, and read with IFS=tab
+    # COLLAPSES empty fields (tab is an IFS whitespace character), which shifts
+    # every later column by one. Normalise the row first: an absent field
+    # becomes "-", which is what this module means by unobserved anyway.
+    local norm="$raw.norm"
+    awk -F'\t' -v OFS='\t' '{
+        for (i = 1; i <= NF; i++) if ($i == "" || $i == "-") $i = "-"
+        print
+    }' "$raw" > "$norm"
+
+    local store="$SC_DIR/ims_catch.tsv"
+    mkdir -p "$SC_DIR" 2>/dev/null
+    [[ -f "$store" ]] || printf 'ts\tcapture\tframe\tkind\tsrc\timpi\timpu\trealm\tnonce\talgorithm\tqop\tcell_id\texpires\tbasis\n' > "$store"
+    local when; when=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local nreg=0 nchal=0 nimpi=0 rows=0 frame src method status impi impu touser realm nonce algo qop cell contact exp
+    # 14 fields, in the order tshark was asked for them: frame, src, method,
+    # status, auth.username, from.user, to.user, auth.realm, auth.nonce,
+    # auth.algorithm, auth.qop, pani cell id, Contact, Expires.
+    printf 'capture\t%s\n' "$(sc_sanitize "$pcap")"
+    printf 'raw\t%s\n' "$raw"
+    while IFS=$'\t' read -r frame src method status impi impu touser realm nonce algo qop cell contact exp; do
+        [[ -n "$frame" && "$frame" != "-" ]] || continue
+        # tshark keeps the quotes a header carried; the value is inside them.
+        impi=$(printf '%s' "$impi" | sed 's/^"//; s/"$//')
+        realm=$(printf '%s' "$realm" | sed 's/^"//; s/"$//')
+        nonce=$(printf '%s' "$nonce" | sed 's/^"//; s/"$//')
+        qop=$(printf '%s' "$qop" | sed 's/^"//; s/"$//')
+        algo=$(printf '%s' "$algo" | sed 's/^"//; s/"$//')
+        local kind='other'
+        [[ "$method" == "REGISTER" ]] && kind='register'
+        [[ "$status" == "401" ]] && kind='challenge-401'
+        [[ "$status" == "407" ]] && kind='challenge-407'
+        [[ "$kind" == 'other' ]] && continue
+        rows=$((rows + 1))
+        [[ "$kind" == 'register' ]] && nreg=$((nreg + 1))
+        [[ "$kind" == challenge-* ]] && nchal=$((nchal + 1))
+        # tshark prints a field it cannot find as "-" (or empty, per option):
+        # both mean unobserved, and neither is a value.
+        [[ "$impi" == "-" || -z "$impi" ]] && impi=''
+        [[ "$impu" == "-" || -z "$impu" ]] && impu=''
+        [[ "$realm" == "-" || -z "$realm" ]] && realm=''
+        [[ -n "$impi" ]] && nimpi=$((nimpi + 1))
+        printf 'msg\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$frame" "$kind" "${src:--}" "${impi:-unobserved}" "${impu:-unobserved}" \
+            "${realm:-unobserved}" "${nonce:--}" "${algo:--}" "${qop:--}" \
+            "${cell:--}" "${contact:--}"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$when" "$(sc_sanitize "$pcap")" "$frame" "$kind" "$(sc_sanitize "${src:--}")" \
+            "$(sc_sanitize "${impi:--}")" "$(sc_sanitize "${impu:--}")" "$(sc_sanitize "${realm:--}")" \
+            "$(sc_sanitize "${nonce:--}")" "$(sc_sanitize "${algo:--}")" "$(sc_sanitize "${qop:--}")" \
+            "$(sc_sanitize "${cell:--}")" "$(sc_sanitize "${exp:--}")" measured >> "$store"
+    done < "$norm"
+    printf 'registers\t%s\n' "$nreg"
+    printf 'challenges\t%s\n' "$nchal"
+    printf 'impi_disclosed\t%s\n' "$nimpi"
+    printf 'rows\t%s\n' "$rows"
+    printf 'store\t%s\n' "$store"
+    if (( rows == 0 )); then
+        printf 'status\tunobserved\n'
+        printf 'WHY\tthe capture carried no SIP REGISTER and no 401/407: an IMS registration is only visible if the handset had an IMS APN and a reachable P-CSCF, and this capture shows neither\n' >&2
+        return 1
+    fi
+    if (( nimpi == 0 )); then
+        printf 'status\tchallenge-only\n'
+        printf 'WHY\tno Authorization header carried a username: the handset had not answered a challenge yet, so the IMPI is unobserved in this capture (the first REGISTER is sent before one, RFC 3261 22.1)\n'
+    else
+        printf 'status\timpi-disclosed\n'
+    fi
+    return 0
+}
+
+sc_ims_plan() {  # [plmn]
+    local plmn="${1:-00101}" realm
+    realm=$(sc_ims_realm "$plmn")
+    printf 'step\t1\tcamp the handset\t%s\n' "--build-cell $plmn then --start (needs srsRAN, Open5GS and an SDR)"
+    printf 'step\t2\tgive it an IMS APN\t%s\n' "the PDU session that carries the IMS APN decides whether a REGISTER is sent at all"
+    printf 'step\t3\tbe the P-CSCF\t%s\n' "--ims-catch build writes the REGISTER a handset would send to sip:$realm; the catcher answers as the proxy so the handset answers the challenge"
+    printf 'step\t4\tread the disclosure\t%s\n' 'IMPI in Authorization.username, IMPU in From, realm and nonce in the WWW-Authenticate/Proxy-Authenticate'
+    printf 'step\t5\trecord it\t%s\n' "--ims-catch read <pcap> appends one row per message to $SC_DIR/ims_catch.tsv"
+    printf 'realm\t%s\n' "$realm"
+    printf 'impi_form\t%s\n' "<IMSI>@$realm  (TS 23.003 13.2)"
+    printf 'range\t%s\n' 'the SIP path is only reachable from a handset that trusts the cell and has IMS configured'
+    printf 'unobserved\t%s\n' 'whether a given handset sends a REGISTER at all: that is the handset'"'"'s policy and is not knowable from here'
+    printf 'ref\tTS 23.003 13.2; RFC 3261 10.2 / 22.1; RFC 3310 3.2; TS 24.229 (IMS SIP profile)\n'
+    printf 'handoff\t%s\n' '3'
+    printf 'WHY\tnothing is transmitted here: the register and the challenge are built and read, and putting a handset on a cell belongs to --start on a radio this process does not own\n'
+    return 3
+}
+
+sc_ims_catch() {  # <build|read|plan> [args]
+    local mode="${1:-}"
+    (($# > 0)) && shift
+    case "$mode" in
+        build) sc_ims_build "$@" ;;
+        read)  sc_ims_read "${1:-}" ;;
+        plan)  sc_ims_plan "${1:-00101}" ;;
+        '') printf 'ERROR\tusage: --ims-catch <build|read|plan> [args]\n' >&2
+            printf 'WHY\tbuild writes a REGISTER, read parses a capture, plan says what is missing\n' >&2
+            return 2 ;;
+        *)  printf 'ERROR\tunknown --ims-catch mode %s (build|read|plan)\n' "$(sc_sanitize "$mode")" >&2
+            return 2 ;;
+    esac
+}
+
 sc_selftest() {
     local bad=0 n=0
     local d; d="$(mktemp -d)" || return 1
@@ -1455,6 +1736,120 @@ EOF
     export PATH="$saved_path"
     rm -f "$d/bin/gnb" "$d/bin/open5gs-amfd" "$d/bin/hackrf_info"
 
+    # ── --ims-catch: build, read, plan ─────────────────────────────────
+    # The REGISTER built here is a string this test can also build by hand, so
+    # the assertion is on the fields, not on "a big blob came out". The digest
+    # is checked against an independent MD5 in python: if the module's
+    # arithmetic and RFC 2617 3.2.2 ever disagree, this row is what says so.
+    local idir="$d/ims"
+    mkdir -p "$idir/captures" "$idir/loot"
+    local out rc2
+    out=$(sc_ims_build '001010000000001@ims.mnc001.mcc001.3gppnetwork.org' 15551234567); rc2=$?
+    chk ims-build-rc        "$rc2" "0"
+    chk ims-build-reqline   "$(kv "$out" request_line)" "REGISTER sip:ims.mnc001.mcc001.3gppnetwork.org SIP/2.0"
+    chk ims-build-realm     "$(kv "$out" realm)" "ims.mnc001.mcc001.3gppnetwork.org"
+    chk ims-build-impi      "$(kv "$out" impi)" "001010000000001@ims.mnc001.mcc001.3gppnetwork.org"
+    chk ims-build-impi-b    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="impi"{print $3}')" "advertised"
+    chk ims-build-noauth    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="authorization"{print $2}')" "unobserved"
+    chk ims-build-notsent   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="transmitted"{print $2}')" "no"
+    # RFC 3261 7: the header block ends with an empty line.
+    chk ims-build-terminator "$(case "$out" in *$'\r\n\r\n'*) echo terminated ;; *) echo unterminated ;; esac)" "terminated"
+    chk ims-build-branch    "$(printf '%s\n' "$out" | grep -c '^Via: SIP/2.0/UDP .*;branch=z9hG4bK')" "1"
+    chk ims-build-pani      "$(printf '%s\n' "$out" | grep -c '^P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=')" "0"
+    chk ims-build-noargs    "$(sc_ims_build >/dev/null 2>&1; echo $?)" "2"
+
+    # The digest, against an MD5 that does not share a line of code with it.
+    local dg resp want
+    dg=$(sc_ims_build '001010000000001@ims.mnc001.mcc001.3gppnetwork.org' 15551234567 \
+            --nonce 00112233445566778899aabbccddeeff --res 00112233445566778899aabbccddeeff \
+            --cnonce deadbeef --nc 00000001 --qop auth)
+    resp=$(kv "$dg" response)
+    want=$(python3 - 001010000000001@ims.mnc001.mcc001.3gppnetwork.org ims.mnc001.mcc001.3gppnetwork.org \
+            00112233445566778899aabbccddeeff 00112233445566778899aabbccddeeff \
+            sip:ims.mnc001.mcc001.3gppnetwork.org deadbeef 00000001 auth <<'PYD'
+import hashlib, base64, sys
+impi, realm, reshex, nonce, uri, cnonce, nc, qop = sys.argv[1:9]
+pw = base64.b64encode(bytes.fromhex(reshex)).decode()
+h = lambda s: hashlib.md5(s.encode()).hexdigest()
+ha1 = h("%s:%s:%s" % (impi, realm, pw))
+ha2 = h("REGISTER:%s" % uri)
+print(h("%s:%s:%s:%s:%s:%s" % (ha1, nonce, nc, cnonce, qop, ha2)))
+PYD
+)
+    chk ims-digest-length "$(printf '%s' "$resp" | wc -c | tr -d ' ')" "32"
+    chk ims-digest-referee "$resp" "$want"
+    chk ims-catch-nomode  "$(sc_ims_catch >/dev/null 2>&1; echo $?)" "2"
+    chk ims-catch-badmode "$(sc_ims_catch sniff >/dev/null 2>&1; echo $?)" "2"
+
+    # A capture with one REGISTER carrying the IMPI and one 401 challenge.
+    python3 - "$idir/two.pcap" << 'PYSIP'
+import struct, sys
+def udp(payload, sport, dport, src, dst):
+    l4 = struct.pack(">HHHH", sport, dport, 8 + len(payload), 0) + payload
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(l4), 0x1234, 0, 64, 17, 0,
+                     bytes(map(int, src.split('.'))), bytes(map(int, dst.split('.'))))
+    return bytes.fromhex("0200000000010200000000020800") + ip + l4
+reg = ("REGISTER sip:ims.mnc001.mcc001.3gppnetwork.org SIP/2.0\r\n"
+  "Via: SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK1;rport\r\nMax-Forwards: 70\r\n"
+  "From: <sip:15551234567@ims.mnc001.mcc001.3gppnetwork.org>;tag=abc\r\n"
+  "To: <sip:15551234567@ims.mnc001.mcc001.3gppnetwork.org>\r\n"
+  "Call-ID: 1@192.0.2.10\r\nCSeq: 1 REGISTER\r\n"
+  "Contact: <sip:15551234567@192.0.2.10>;expires=600000\r\nExpires: 600000\r\n"
+  "P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=001010000000001\r\n"
+  "Authorization: Digest username=\"001010000000001@ims.mnc001.mcc001.3gppnetwork.org\", "
+  "realm=\"ims.mnc001.mcc001.3gppnetwork.org\", nonce=\"00112233445566778899aabbccddeeff\", "
+  "uri=\"sip:ims.mnc001.mcc001.3gppnetwork.org\", response=\"e0e50f017230cf7553d76b1fc28248be\", "
+  "algorithm=AKAv1-MD5, qop=auth, nc=00000001, cnonce=\"deadbeef\"\r\nContent-Length: 0\r\n\r\n").encode()
+chal = ("SIP/2.0 401 Unauthorized\r\n"
+  "Via: SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK1;rport\r\n"
+  "From: <sip:15551234567@ims.mnc001.mcc001.3gppnetwork.org>;tag=abc\r\n"
+  "To: <sip:15551234567@ims.mnc001.mcc001.3gppnetwork.org>;tag=srv\r\n"
+  "Call-ID: 1@192.0.2.10\r\nCSeq: 1 REGISTER\r\n"
+  "WWW-Authenticate: Digest realm=\"ims.mnc001.mcc001.3gppnetwork.org\", "
+  "nonce=\"00112233445566778899aabbccddeeff\", algorithm=AKAv1-MD5, qop=\"auth\"\r\n"
+  "Content-Length: 0\r\n\r\n").encode()
+recs = [(udp(reg, 5060, 5060, "192.0.2.10", "192.0.2.20"), 0.0),
+        (udp(chal, 5060, 5060, "192.0.2.20", "192.0.2.10"), 0.1)]
+with open(sys.argv[1], "wb") as fh:
+    fh.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 262144, 1))
+    for f, off in recs:
+        sec = 1700000000 + int(off); usec = int(round((off - int(off)) * 1e6))
+        fh.write(struct.pack("<IIII", sec, usec, len(f), len(f)))
+        fh.write(f)
+PYSIP
+    chk ims-fixture-exists "$([[ -s "$idir/two.pcap" ]] && echo present || echo missing)" "present"
+
+    if command -v tshark >/dev/null 2>&1; then
+        local ro rr
+        SC_DIR="$idir/loot"; SC_CAP="$idir/captures"
+        ro=$(sc_ims_read "$idir/two.pcap"); rr=$?
+        chk ims-read-rc       "$rr" "0"
+        chk ims-read-reg      "$(kv "$ro" registers)" "1"
+        chk ims-read-chal     "$(kv "$ro" challenges)" "1"
+        chk ims-read-impi-n   "$(kv "$ro" impi_disclosed)" "1"
+        chk ims-read-status   "$(kv "$ro" status)" "impi-disclosed"
+        chk ims-read-impi     "$(printf '%s\n' "$ro" | awk -F'\t' '$1=="msg" && $3=="register"{print $5}')" \
+                              "001010000000001@ims.mnc001.mcc001.3gppnetwork.org"
+        chk ims-read-realm    "$(printf '%s\n' "$ro" | awk -F'\t' '$1=="msg" && $3=="register"{print $7}')" \
+                              "ims.mnc001.mcc001.3gppnetwork.org"
+        # The challenge carries no username: the IMPI is unobserved there, and
+        # the word in the row says so rather than a blank field.
+        chk ims-read-chal-grey "$(printf '%s\n' "$ro" | awk -F'\t' '$1=="msg" && $3=="challenge-401"{print $5}')" "unobserved"
+        chk ims-read-cell     "$(printf '%s\n' "$ro" | awk -F'\t' '$1=="msg" && $3=="register"{print ($11 ~ /001010000000001/) ? "cell-advertised" : "no"}')" "cell-advertised"
+        chk ims-store-hdr     "$(head -1 "$SC_DIR/ims_catch.tsv" 2>/dev/null | cut -f1)" "ts"
+        chk ims-store-rows    "$(awk -F'\t' 'NR>1' "$SC_DIR/ims_catch.tsv" 2>/dev/null | grep -c . || true)" "2"
+        # A capture with no SIP in it: unobserved, and refused.
+        head -c 0 /dev/null > "$idir/empty.pcap"
+        sc_ims_read "$idir/empty.pcap" >/dev/null 2>&1
+        chk ims-read-nosip-rc "$(sc_ims_read "$idir/empty.pcap" >/dev/null 2>&1; echo $?)" "1"
+    else
+        printf '%-34s SKIP\t%s\n' ims-read-rc "tshark not installed"
+    fi
+    chk ims-plan-rc      "$(sc_ims_plan 2>/dev/null >/dev/null; echo $?)" "3"
+    chk ims-plan-handoff "$(sc_ims_plan 2>/dev/null | awk -F'\t' '$1=="handoff"{print $2}')" "3"
+    chk ims-read-missing "$(sc_ims_read "$idir/nothere.pcap" >/dev/null 2>&1; echo $?)" "1"
+    chk ims-read-nousage "$(sc_ims_read >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\nRESULT\t%s\n' "$n" "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     (( bad == 0 ))
 }
@@ -1473,6 +1868,7 @@ suci_catcher_menu() {
   [8] Classify SUCI from a capture or a hex list
   [9] Write and verify the SUCI corpus
   [10] Status
+  [11] IMS catch: build a REGISTER, read the disclosure, or the plan
   [0] Back
 EOF
     local choice a b
@@ -1498,6 +1894,17 @@ EOF
            read -rp '  press enter ' _ ;;
         9) sc_corpus; read -rp '  press enter ' _ ;;
         10) sc_status; read -rp '  press enter ' _ ;;
+        11) printf '  [b] build a REGISTER  [r] read a capture  [p] plan\n'
+           read -rp '  choice> ' a || return 0
+           case "$a" in
+               b) read -rp '  IMPI (imsi@realm or imsi)> ' a || return 0
+                  read -rp '  IMPU (msisdn or sip uri)> ' b || return 0
+                  sc_ims_build "$a" "$b" ;;
+               r) read -rp '  capture path> ' a || return 0; sc_ims_read "$a" ;;
+               p) read -rp '  PLMN (blank for 00101)> ' a || a=00101; sc_ims_plan "$a" ;;
+               *) printf 'ERROR\tunknown choice\n' >&2 ;;
+           esac
+           read -rp '  press enter ' _ ;;
         0|'') return 0 ;;
         *) printf 'ERROR\tunknown choice\n' >&2; read -rp '  press enter ' _ ;;
     esac
@@ -1519,6 +1926,7 @@ sc_cli_main() {
         --parse)        sc_parse "${1:-}" "${2:-}" ;;
         --deconceal)    sc_deconceal "${1:-}" "${2:-}" ;;
         --capture)      sc_capture "${1:-}" ;;
+        --ims-catch)    sc_ims_catch "$@" ;;
         --classify)     sc_classify "$@" ;;
         --classify-capture) sc_classify_capture "${1:-}" ;;
         --corpus)       sc_corpus "${1:-}" ;;
@@ -1568,6 +1976,13 @@ The pre-authentication identity exchange, built and driven:
   --corpus [dir]        write and verify a fixture corpus: null scheme, profile
                         A, profile B and the malformed cases
   --check-trace <tsv>   validate a direction<TAB>event trace
+  --ims-catch <build|read|plan> [args]
+                        the IMS half of the catcher: `build <impi> <impu>` writes
+                        the SIP REGISTER a handset sends (adding the AKAv1-MD5
+                        Authorization when --res and --nonce are given), `read
+                        <pcap>` records the IMPI/IMPU disclosure and the 401/407
+                        challenge per message, `plan` says what is missing and
+                        hands off (rc 3). Nothing is transmitted.
 
 Builders and codecs (no radio, no files written):
 

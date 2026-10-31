@@ -1109,6 +1109,517 @@ capi_cmd_execute() {
     (( findings == 0 )) && return 0 || return 1
 }
 
+# ── TR-069 (CWMP) and TR-369 (USP) ──────────────────────────────────────
+# A CPE management server is a second front door into the same subscriber
+# premises the self-care API fronts, and it speaks a protocol the API verbs
+# never touched: SOAP over HTTP for TR-069, and the USP message envelope for
+# TR-369. Both halves are here -- the message a CPE sends, and the read of one
+# that was captured -- because a management session that is built but never read
+# back is a message nobody has checked.
+#
+# TR-069 CWMP, the parts used here (Amendment 6):
+#   3.4.1  the CPE opens a TCP connection and POSTs a SOAP message; the method
+#          name travels in the SOAPAction header, quoting the CWMP namespace
+#   A.3.2.1 the Inform: Event (EventStruct/EventCode/CommandKey), MaxEnvelopes,
+#          CurrentTime, RetryCount, ParameterList of ParameterValueStruct
+#   A.3.2.2 the InformResponse (MaxEnvelopes only)
+#   A.3.2.2/A.3.2.3 the empty POST the CPE sends, and GetParameterValues /
+#          GetParameterValuesResponse with ParameterNames and ParameterList
+#   Table 3 the event codes: 0 BOOTSTRAP, 1 BOOT, 2 PERIODIC, 3 SCHEDULED,
+#          4 VALUE CHANGE, 5 KICKED, 6 CONNECTION REQUEST, 7 TRANSFER COMPLETE,
+#          8 DIAGNOSTICS COMPLETE
+# The namespace is urn:dslforum-org:cwmp-1-0 for every message this module
+# builds; a world without the namespace is a different protocol version, and one
+# is not substituted for the other.
+CAPI_CWMP_NS='urn:dslforum-org:cwmp-1-0'
+CAPI_CWMP_EVENTS='0 BOOTSTRAP|1 BOOT|2 PERIODIC|3 SCHEDULED|4 VALUE CHANGE|5 KICKED|6 CONNECTION REQUEST|7 TRANSFER COMPLETE|8 DIAGNOSTICS COMPLETE'
+
+capi_cwmp_build_inform() {  # [--oui] [--product-class] [--serial] [--event] [--acs] [--out]
+    local oui='001122' pclass='IGD' serial='000000000001' event='1 BOOT'
+    local acs='http://192.0.2.1:7547/ACS-server/ACS' out='' cwmp_id=''
+    while (($#)); do
+        case "$1" in
+            --oui)           oui="${2:-}"; shift 2 ;;
+            --product-class) pclass="${2:-}"; shift 2 ;;
+            --serial)        serial="${2:-}"; shift 2 ;;
+            --event)         event="${2:-}"; shift 2 ;;
+            --acs)           acs="${2:-}"; shift 2 ;;
+            --id)            cwmp_id="${2:-}"; shift 2 ;;
+            --out)           out="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown flag %s\n' "$(capi_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$oui" =~ ^[0-9A-Fa-f]{6}$ ]] || {
+        printf 'ERROR\t--oui is six hex octets (TR-069 A.3.2.1 Device.DeviceInfo.ManufacturerOUI)\n' >&2; return 2; }
+    # An event code is one of the ones in Table 3; anything else is a code this
+    # module cannot name, and naming it anyway would be inventing a message.
+    case "|$CAPI_CWMP_EVENTS|" in
+        *"|$event|"*) ;;
+        *) printf 'ERROR\tevent code not in TR-069 Table 3: %s\n' "$(capi_sanitize "$event")" >&2
+           printf 'KNOWN\t%s\n' "$(printf '%s' "$CAPI_CWMP_EVENTS" | tr '|' ',')" >&2
+           return 2 ;;
+    esac
+    local now; now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local body
+    # A.3.2.1: the Inform carries the parameters that say who the CPE is.
+    body=$(cat <<XML
+    <cwmp:Inform>
+      <Event xmlns:soap-enc="http://schemas.xmlsoap.org/soap/encoding/" soap-enc:arrayType="cwmp:EventStruct[1]">
+        <EventStruct>
+          <EventCode>$(capi_sanitize "$event")</EventCode>
+          <CommandKey>$(capi_sanitize "$cwmp_id")</CommandKey>
+        </EventStruct>
+      </Event>
+      <MaxEnvelopes>1</MaxEnvelopes>
+      <CurrentTime>${now}</CurrentTime>
+      <RetryCount>0</RetryCount>
+      <ParameterList>
+        <ParameterValueStruct>
+          <Name>Device.DeviceInfo.ManufacturerOUI</Name>
+          <Value xsi:type="xsd:string">$(capi_sanitize "$oui")</Value>
+        </ParameterValueStruct>
+        <ParameterValueStruct>
+          <Name>Device.DeviceInfo.ProductClass</Name>
+          <Value xsi:type="xsd:string">$(capi_sanitize "$pclass")</Value>
+        </ParameterValueStruct>
+        <ParameterValueStruct>
+          <Name>Device.DeviceInfo.SerialNumber</Name>
+          <Value xsi:type="xsd:string">$(capi_sanitize "$serial")</Value>
+        </ParameterValueStruct>
+        <ParameterValueStruct>
+          <Name>Device.DeviceInfo.SoftwareVersion</Name>
+          <Value xsi:type="xsd:string">unobserved</Value>
+        </ParameterValueStruct>
+      </ParameterList>
+    </cwmp:Inform>
+XML
+)
+    local xml
+    xml=$(cat <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:cwmp="${CAPI_CWMP_NS}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Header/>
+  <soap:Body>
+${body}
+  </soap:Body>
+</soap:Envelope>
+XML
+)
+    local clen; clen=$(printf '%s' "$xml" | wc -c | tr -d ' ')
+    printf 'protocol\tTR-069 (CWMP)\n'
+    printf 'method\tInform\n'
+    printf 'namespace\t%s\n' "$CAPI_CWMP_NS"
+    printf 'soapaction\t"%s#Inform"\n' "$CAPI_CWMP_NS"
+    printf 'http\tPOST %s HTTP/1.1\n' "$(capi_sanitize "$acs")"
+    printf 'content_type\ttext/xml; charset="utf-8"\n'
+    printf 'content_length\t%s\n' "$clen"
+    printf 'event\t%s\tadvertised\tTR-069 Table 3; an event code is the CPE reporting about itself\n' "$(capi_sanitize "$event")"
+    printf 'oui\t%s\tadvertised\tDevice.DeviceInfo.ManufacturerOUI (TR-069 A.3.2.1)\n' "$(capi_sanitize "$oui")"
+    printf 'product_class\t%s\tadvertised\tDevice.DeviceInfo.ProductClass\n' "$(capi_sanitize "$pclass")"
+    printf 'serial\t%s\tadvertised\tDevice.DeviceInfo.SerialNumber\n' "$(capi_sanitize "$serial")"
+    printf 'software_version\tunobserved\tthis builder writes the literal "unobserved" rather than a version this host does not know\n'
+    printf 'transmitted\tno\n'
+    printf '%s\n' "$xml"
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "$xml" > "$out" || { printf 'ERROR\tcannot write %s\n' "$(capi_sanitize "$out")" >&2; return 1; }
+        printf 'written\t%s\n' "$(capi_sanitize "$out")"
+    fi
+    printf 'ref\tTR-069 Amendment 6 3.4.1 (transport, SOAPAction), A.3.2.1 (Inform), Table 3 (event codes)\n'
+    return 0
+}
+
+capi_cwmp_build_gpv() {  # <param>... [--out <file>]
+    local -a params=() 
+    local out=''
+    while (($#)); do
+        case "$1" in
+            --out) out="${2:-}"; shift 2 ;;
+            -*) printf 'ERROR\tunknown flag %s\n' "$(capi_sanitize "$1")" >&2; return 2 ;;
+            *) params+=("$1"); shift ;;
+        esac
+    done
+    ((${#params[@]} > 0)) || {
+        printf 'ERROR\tusage: --cwmp build-gpv <param-path> [<param-path>...] [--id <cwmp-id>] [--out <file>]\n' >&2
+        printf 'WHY\ta GetParameterValues with no ParameterNames asks for nothing\n' >&2
+        return 2; }
+    local names=''
+    local p
+    for p in "${params[@]}"; do
+        # A parameter path is a data-model path, not free text: it has to keep
+        # its dots and must not carry the quoting that would break the XML.
+        p=$(capi_sanitize "$p")
+        names+="        <string>${p}</string>"$'\n'
+    done
+    local xml
+    xml=$(cat <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:cwmp="${CAPI_CWMP_NS}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Header/>
+  <soap:Body>
+    <cwmp:GetParameterValues>
+      <ParameterNames soap-enc:arrayType="xsd:string[${#params[@]}]" xmlns:soap-enc="http://schemas.xmlsoap.org/soap/encoding/">
+${names}      </ParameterNames>
+    </cwmp:GetParameterValues>
+  </soap:Body>
+</soap:Envelope>
+XML
+)
+    printf 'protocol\tTR-069 (CWMP)\n'
+    printf 'method\tGetParameterValues\n'
+    printf 'soapaction\t"%s#GetParameterValues"\n' "$CAPI_CWMP_NS"
+    printf 'parameters\t%s\n' "${#params[@]}"
+    for p in "${params[@]}"; do
+        printf 'param\t%s\trequested\n' "$(capi_sanitize "$p")"
+    done
+    printf 'transmitted\tno\n'
+    printf '%s\n' "$xml"
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "$xml" > "$out" || { printf 'ERROR\tcannot write %s\n' "$(capi_sanitize "$out")" >&2; return 1; }
+        printf 'written\t%s\n' "$(capi_sanitize "$out")"
+    fi
+    printf 'ref\tTR-069 Amendment 6 A.3.2.2 (GetParameterValues) and 3.4.1 (SOAPAction)\n'
+    return 0
+}
+
+# One SOAP message in, rows out. python3 with the standard library does the
+# XML: a hand-rolled parser would disagree with every real CPE in a way that is
+# invisible until it matters.
+capi_cwmp_parse() {  # <file|->
+    local file="${1:-}"
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --cwmp parse <file|->\n' >&2; return 2; }
+    if [[ "$file" != "-" && ! -r "$file" ]]; then
+        printf 'ERROR\tcannot read %s\n' "$(capi_sanitize "$file")" >&2; return 1
+    fi
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is required to parse SOAP (xml.etree, standard library only)\n' >&2
+        printf 'WHY\tinstall python3; no package is needed and none is used\n' >&2
+        return 1; }
+    # The program arrives on stdin, so `-` cannot mean "read the message from
+    # stdin" inside it: the message is carried in an environment variable
+    # instead, which keeps both meanings working.
+    if [[ "$file" == "-" ]]; then
+        export CAPI_SOAP_STDIN="$(cat)"
+    fi
+    python3 - "$file" <<'PY'
+import sys, re, os, xml.etree.ElementTree as ET
+src = os.environ.get("CAPI_SOAP_STDIN", "") if sys.argv[1] == "-" else open(sys.argv[1], "r", errors="replace").read()
+if not src.strip():
+    print("ERROR\tempty input: no SOAP envelope to read")
+    print("WHY\tan empty file is unobserved, not a message that said nothing")
+    sys.exit(1)
+# An HTTP POST header block in front of the body is part of what a capture
+# carries, so read it rather than dropping it.
+soapaction = re.search(r'(?im)^SOAPAction:\s*"?([^"\r\n]+)"?', src)
+ctype = re.search(r'(?im)^Content-Type:\s*([^\r\n]+)', src)
+start = src.find('<')
+if start > 0:
+    src = src[start:]
+try:
+    root = ET.fromstring(src)
+except ET.ParseError as exc:
+    print("ERROR\tnot well-formed XML: %s" % exc)
+    print("WHY\ta SOAP message that does not parse cannot be a CWMP message, and this module does not repair one")
+    sys.exit(1)
+def local(tag):
+    return tag.rsplit('}', 1)[-1] if '}' in tag else tag
+ns = ''
+m = re.match(r'\{(.+)\}', root.tag or '')
+if m:
+    ns = m.group(1)
+print("envelope\t%s" % (local(root.tag)))
+print("namespace\t%s" % (ns or "unobserved"))
+if soapaction:
+    print("soapaction\t%s" % soapaction.group(1).strip())
+else:
+    print("soapaction\tunobserved\tno HTTP header block in front of the body, so the method is taken from the element name")
+if ctype:
+    print("content_type\t%s" % ctype.group(1).strip())
+body = None
+for child in root:
+    if local(child.tag) == 'Body':
+        body = child
+if body is None:
+    print("ERROR\ta SOAP envelope with no Body")
+    sys.exit(1)
+msgs = list(body)
+if not msgs:
+    print("method\tempty\tTR-069 A.3.2.2: the CPE sends an empty POST to receive the ACS's requests")
+    print("verdict\tempty-post")
+    sys.exit(0)
+method = local(msgs[0].tag)
+print("method\t%s" % method)
+events = []
+params = []
+for el in msgs[0].iter():
+    t = local(el.tag)
+    if t == 'EventCode':
+        events.append((el.text or '').strip())
+    elif t == 'Name' and el.text:
+        params.append([el.text.strip(), None])
+    elif t == 'Value':
+        for p in reversed(params):
+            if p[1] is None:
+                p[1] = (el.text or '').strip()
+                break
+for e in events:
+    known = e in ("0 BOOTSTRAP", "1 BOOT", "2 PERIODIC", "3 SCHEDULED",
+                  "4 VALUE CHANGE", "5 KICKED", "6 CONNECTION REQUEST",
+                  "7 TRANSFER COMPLETE", "8 DIAGNOSTICS COMPLETE")
+    print("event\t%s\t%s" % (e, "measured" if known else "unobserved\tnot in TR-069 Table 3"))
+for name, value in params:
+    print("param\t%s\t%s" % (name, value if value is not None else "unobserved"))
+if not events and not params:
+    print("note\tno Event and no ParameterValueStruct in this message")
+kinds = {
+    "Inform": "cpe-to-acs",
+    "InformResponse": "acs-to-cpe",
+    "GetParameterValues": "acs-to-cpe",
+    "GetParameterValuesResponse": "cpe-to-acs",
+    "SetParameterValues": "acs-to-cpe",
+    "SetParameterValuesResponse": "cpe-to-acs",
+    "GetParameterNames": "acs-to-cpe",
+    "GetParameterNamesResponse": "cpe-to-acs",
+    "AddObject": "acs-to-cpe",
+    "DeleteObject": "acs-to-cpe",
+    "Reboot": "acs-to-cpe",
+    "Download": "acs-to-cpe",
+    "Upload": "acs-to-cpe",
+    "Fault": "either",
+}
+print("direction\t%s" % kinds.get(method, "unobserved\tnot a method this module names"))
+print("verdict\tparsed")
+PY
+    local rc=$?
+    return $rc
+}
+
+capi_cwmp_plan() {
+    cat <<'EOF'
+protocol	TR-069 (CWMP)
+status	handoff
+what	a CPE management session, read from the CPE's side and from the ACS's
+step	1	POST the Inform (--cwmp build-inform) to the ACS URL; the ACS answers an InformResponse
+step	2	the CPE sends an empty POST (TR-069 A.3.2.2) so the ACS can push its own requests on the same connection
+step	3	GetParameterValues (--cwmp build-gpv) selects the subtree an ACS reads back
+step	4	--cwmp parse either message, and the answer, to see what the CPE disclosed
+yields	the OUI, product class, serial number and the parameter values the CPE hands to whoever asks in the management session
+boundary	the ACS URL is delivered by DHCP option 43 or by a static configuration; a CPE only talks to the ACS it was told about, so a session only exists against a server the CPE already trusts
+missing	nothing on this host: the messages are built and parsed offline
+ref	TR-069 Amendment 6 3.4.1, A.3.2.1 to A.3.2.3, Table 3
+EOF
+    return 0
+}
+
+# ── TR-369 (USP) ────────────────────────────────────────────────────────
+# A USP message is a protobuf `Msg`. Building one on the wire needs the field
+# numbers from usp-msg.proto, and that file is not on this machine: no
+# usp-msg*.proto exists under /usr/share, /usr/local/share or this tree. So the
+# builder writes the message as a named tree -- which is the part a reader can
+# check -- and prints `wire  unobserved` naming the file rather than inventing a
+# tag. --usp parse reads a protobuf dump generically: the wire format is
+# mechanical (varint / 64-bit / length-delimited / 32-bit), so field numbers and
+# types can be read without the .proto; only the NAMES cannot, and they stay
+# unobserved.
+capi_usp_build_msg() {  # [--msg-id] [--session-id] [--type] [--op] [--param-path]... [--max-depth]
+    local msg_id='' session='' mtype='request' op='get' depth=''
+    local -a paths=()
+    while (($#)); do
+        case "$1" in
+            --msg-id)     msg_id="${2:-}"; shift 2 ;;
+            --session-id) session="${2:-}"; shift 2 ;;
+            --type)       mtype="${2:-}"; shift 2 ;;
+            --op)         op="${2:-}"; shift 2 ;;
+            --param-path) paths+=("${2:-}"); shift 2 ;;
+            --max-depth)  depth="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown flag %s\n' "$(capi_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    # The four message types are the four the envelope defines. A fifth word is
+    # not a type, and calling it one would be a message no agent accepts.
+    case "$mtype" in
+        error|request|response|notify) ;;
+        *) printf 'ERROR\t--type is one of error, request, response, notify (the Msg msg_type values)\n' >&2; return 2 ;;
+    esac
+    # The operations a Request carries are the ones TR-369 names; the list is
+    # the spec's, not a guess at an enum encoding.
+    case "$op" in
+        get|get_supported_dm|get_instances|set|add|delete|operate|notify) ;;
+        *) printf 'ERROR\t--op is one of get, get_supported_dm, get_instances, set, add, delete, operate, notify (TR-369 request operations)\n' >&2; return 2 ;;
+    esac
+    [[ -z "$depth" || "$depth" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--max-depth is a whole number of levels\n' >&2; return 2; }
+    [[ -n "$msg_id" ]] || msg_id="msg-$(date -u +%s)-$$"
+    [[ -n "$session" ]] || session="session-$(date -u +%s)"
+    printf 'protocol\tTR-369 (USP)\n'
+    printf 'envelope\tMsg\n'
+    printf 'msg_id\t%s\n' "$(capi_sanitize "$msg_id")"
+    printf 'msg_type\t%s\n' "$mtype"
+    printf 'session_id\t%s\n' "$(capi_sanitize "$session")"
+    printf 'request_op\t%s\tadvertised\tthe operation named in the request body (TR-369 Request oneof)\n' "$op"
+    case "$op" in
+        get|get_instances)
+            if ((${#paths[@]})); then
+                local p
+                for p in "${paths[@]}"; do
+                    printf 'param_path\t%s\trequested\n' "$(capi_sanitize "$p")"
+                done
+                printf 'param_paths\t%s\n' "${#paths[@]}"
+            else
+                printf 'param_paths\tunobserved\tno --param-path given, so the request names no path; a Get with no path is a message that asks for nothing\n'
+            fi
+            ;;
+        *)
+            printf 'param_paths\tunobserved\tthis builder fills request paths for get and get_instances only; %s carries operands this builder does not encode\n' "$op"
+            ;;
+    esac
+    if [[ -n "$depth" ]]; then
+        printf 'max_depth\t%s\n' "$depth"
+    else
+        printf 'max_depth\tunobserved\tnot set; an agent defaults it, and the default is the agent'"'"'s, not ours\n'
+    fi
+    printf 'wire\tunobserved\tusp-msg.proto is not on this machine (no usp-msg*.proto under /usr/share, /usr/local/share or the tree), so the protobuf tag numbers are not guessed; --usp parse reads a real dump without them\n'
+    printf 'transmitted\tno\n'
+    printf 'ref\tTR-369 USP message envelope (Msg: header msg_id/msg_type/session_id; body oneof request/response/error/notify)\n'
+    return 0
+}
+
+# Generic protobuf wire-format walk. No schema, no names, no guesses.
+capi_usp_parse() {  # <hex|file>
+    local arg="${1:-}"
+    [[ -n "$arg" ]] || { printf 'ERROR\tusage: --usp parse <hex-string|file-of-hex>\n' >&2; return 2; }
+    local hex=''
+    if [[ -f "$arg" ]]; then
+        hex=$(tr -d ' \r\n\t:-' < "$arg" | tr 'a-f' 'A-F')
+    else
+        hex=$(printf '%s' "$arg" | tr -d ' \r\n\t:-' | tr 'a-f' 'A-F')
+    fi
+    [[ "$hex" =~ ^[0-9A-F]+$ && $(( ${#hex} % 2 )) -eq 0 ]] || {
+        printf 'ERROR\tnot a run of hex octets: %s\n' "$(capi_sanitize "$arg")" >&2; return 2; }
+    printf 'protocol\tTR-369 (USP)\n'
+    printf 'bytes\t%s\n' "$(( ${#hex} / 2 ))"
+    printf '%s\n' "$hex" | awk '{
+        n = length($0) / 2
+        for (i = 0; i < n; i++) printf "%s ", substr($0, i*2+1, 2)
+        printf "\n"
+    }' > /dev/null 2>&1 || true
+    python3 - "$hex" <<'PY'
+import sys
+hexs = sys.argv[1]
+data = bytes.fromhex(hexs)
+def varint(b, i):
+    shift = 0; val = 0
+    while True:
+        if i >= len(b):
+            raise ValueError("truncated varint")
+        x = b[i]; i += 1
+        val |= (x & 0x7F) << shift; shift += 7
+        if not x & 0x80:
+            return val, i
+def walk(b, depth, path, budget):
+    i = 0
+    while i < len(b):
+        if budget[0] <= 0:
+            print("note\tdepth/field budget reached; the rest of the message is unobserved")
+            return
+        budget[0] -= 1
+        try:
+            tag, i = varint(b, i)
+        except ValueError as exc:
+            print("field\t%s\tunobserved\t%s" % (path or "-", exc))
+            return
+        num = tag >> 3; wt = tag & 7
+        if num == 0:
+            print("field\t%s\tunobserved\tfield number zero is not valid protobuf" % (path or "-"))
+            return
+        where = "%s%d" % ((path + ".") if path else "", num)
+        if wt == 0:
+            v, i = varint(b, i)
+            print("field\t%s\tvarint\t%d" % (where, v))
+        elif wt == 1:
+            print("field\t%s\t64-bit\t%s" % (where, b[i:i+8].hex())); i += 8
+        elif wt == 5:
+            print("field\t%s\t32-bit\t%s" % (where, b[i:i+4].hex())); i += 4
+        elif wt == 2:
+            ln, i = varint(b, i)
+            payload = b[i:i+ln]; i += ln
+            if len(payload) != ln:
+                print("field\t%s\tlength-delimited\ttruncated: wanted %d, have %d" % (where, ln, len(payload)))
+                return
+            printable = payload and all(32 <= c < 127 for c in payload)
+            print("field\t%s\tlength-delimited\t%d octets\t%s" % (
+                where, len(payload), payload.decode() if printable else payload.hex()))
+            if depth < 6 and not printable and len(payload) > 0:
+                sub = []
+                walk(payload, depth + 1, where, [200])
+        else:
+            print("field\t%s\twire-type-%d\tunobserved\twire type 3/4 are the deprecated group forms" % (where, wt))
+            return
+walk(data, 0, "", [500])
+print("names\tunobserved\tfield numbers and wire types are readable without a schema; the field NAMES need usp-msg.proto, which is not on this machine")
+print("verdict\twire-dump")
+PY
+    return $?
+}
+
+capi_usp_plan() {
+    cat <<'EOF'
+protocol	TR-369 (USP)
+status	handoff
+what	a USP message exchange with an agent (the CPE side of TR-369)
+step	1	learn the agent's MTP: USP runs over CoAP, WebSocket or STOMP, and the controller must know which
+step	2	build the Msg (--usp build-msg) with a msg_id, a session_id and a request body
+step	3	serialise it with usp-msg.proto, which is not on this machine -- so the wire bytes are unobserved here and this module will not invent a tag
+step	4	read an exchange back with --usp parse, which needs no schema: it prints field numbers, wire types and payloads
+yields	the parameter paths a request names and the values an answer returns, once a real message exists
+boundary	the agent only answers a controller it was provisioned with; a session exists only where the CPE already trusts the controller
+missing	usp-msg.proto (and the MTP), neither of which is installed here
+ref	TR-369 USP message envelope; protobuf wire format (field number + wire type)
+EOF
+    return 0
+}
+
+# One append-only row per invocation of the TR-069/TR-369 verbs: what was asked
+# for and how it ended. A row records this host's run, not the target's state.
+capi_proto_record() {  # <protocol> <mode> <rc>
+    local dir="${CAPI_DIR:-$LOOT_DIR/carrier_api}"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    printf '%s\t%s\t%s\trc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$(capi_sanitize "$1")" "$(capi_sanitize "$2")" "$(capi_sanitize "$3")" \
+        >> "$dir/cwmp_usp.tsv" 2>/dev/null || true
+    return 0
+}
+
+capi_cwmp() {  # <build-inform|build-gpv|parse|plan> [args]
+    local mode="${1:-}" rcp
+    (($# > 0)) && shift
+    case "$mode" in
+        build-inform) capi_cwmp_build_inform "$@" ;;
+        build-gpv)    capi_cwmp_build_gpv "$@" ;;
+        parse)        capi_cwmp_parse "${1:-}" ;;
+        plan)         capi_cwmp_plan ;;
+        '') printf 'ERROR\tusage: --cwmp <build-inform|build-gpv|parse|plan> [args]\n' >&2; return 2 ;;
+        *) printf 'ERROR\tunknown --cwmp mode %s (build-inform|build-gpv|parse|plan)\n' "$(capi_sanitize "$mode")" >&2; return 2 ;;
+    esac
+    rcp=$?
+    capi_proto_record TR-069 "${mode:-none}" "$rcp"
+    return $rcp
+}
+
+capi_usp() {  # <build-msg|parse|plan> [args]
+    local mode="${1:-}" rcp
+    (($# > 0)) && shift
+    case "$mode" in
+        build-msg) capi_usp_build_msg "$@" ;;
+        parse)     capi_usp_parse "${1:-}" ;;
+        plan)      capi_usp_plan ;;
+        '') printf 'ERROR\tusage: --usp <build-msg|parse|plan> [args]\n' >&2; return 2 ;;
+        *) printf 'ERROR\tunknown --usp mode %s (build-msg|parse|plan)\n' "$(capi_sanitize "$mode")" >&2; return 2 ;;
+    esac
+    rcp=$?
+    capi_proto_record TR-369 "${mode:-none}" "$rcp"
+    return $rcp
+}
+
 capi_selftest() {
     local bad=0 nchk=0
     # There is no gate, so no environment needs holding aside: the selftest is
@@ -1440,6 +1951,80 @@ socketserver.TCPServer(("127.0.0.1",'"$sport"'),H).serve_forever()' >/dev/null 2
         chk exec-live-find   "$(printf '%s\n' "$run" | awk -F'\t' '$1=="finding"{print $2}')" "unauthorised_success"
         chk exec-live-rc1    "$rc1" "1"
     fi
+    # ── TR-069 (CWMP): build the Inform and the GetParameterValues, then read
+    # both back. Nothing here opens a socket: the messages are written or
+    # printed, and `transmitted  no` says so.
+    local cwi gpv pr
+    cwi=$(capi_cwmp build-inform --oui 001122 --product-class IGD --serial SN-1 \
+            --event '1 BOOT' --acs http://192.0.2.9:7547/ACS --out "$d/inform.xml")
+    chk cwmp-inform-method "$(fld "$cwi" method)" "Inform"
+    chk cwmp-inform-action "$(fld "$cwi" soapaction)" '"urn:dslforum-org:cwmp-1-0#Inform"'
+    chk cwmp-inform-http   "$(printf '%s\n' "$cwi" | awk -F'\t' '$1=="http"{print ($2 ~ /^POST /)?"post":"no"}')" "post"
+    chk cwmp-inform-event  "$(printf '%s\n' "$cwi" | awk -F'\t' '$1=="event"{print $2}')" "1 BOOT"
+    chk cwmp-inform-oui    "$(fld "$cwi" oui)" "001122"
+    chk cwmp-inform-sends  "$(fld "$cwi" transmitted)" "no"
+    chk cwmp-inform-wrote  "$([[ -s "$d/inform.xml" ]] && echo yes || echo no)" "yes"
+    chk cwmp-inform-xml    "$(grep -c '<cwmp:Inform>' "$d/inform.xml" 2>/dev/null)" "1"
+    chk cwmp-inform-params "$(grep -c '<ParameterValueStruct>' "$d/inform.xml" 2>/dev/null)" "4"
+    chk cwmp-bad-event-rc  "$(capi_cwmp build-inform --event '9 NOPE' >/dev/null 2>&1; echo $?)" "2"
+    pr=$(capi_cwmp parse "$d/inform.xml"); chk cwmp-parse-rc "$?" "0"
+    chk cwmp-parse-method  "$(fld "$pr" method)" "Inform"
+    chk cwmp-parse-event   "$(printf '%s\n' "$pr" | awk -F'\t' '$1=="event"{print $2}')" "1 BOOT"
+    chk cwmp-parse-param   "$(printf '%s\n' "$pr" | awk -F'\t' '$1=="param" && $2=="Device.DeviceInfo.ManufacturerOUI"{print $3}')" "001122"
+    chk cwmp-parse-dir     "$(fld "$pr" direction)" "cpe-to-acs"
+    chk cwmp-parse-verdict "$(fld "$pr" verdict)" "parsed"
+    # An empty POST is a message, not an error: TR-069 A.3.2.2 uses it so the
+    # ACS can push its own requests on the open connection.
+    printf '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body></soap:Body></soap:Envelope>' > "$d/empty.xml"
+    chk cwmp-empty-post    "$(capi_cwmp parse "$d/empty.xml" | awk -F'\t' '$1=="verdict"{print $2}')" "empty-post"
+    printf 'not xml at all' > "$d/bad.xml"
+    chk cwmp-badxml-rc     "$(capi_cwmp parse "$d/bad.xml" >/dev/null 2>&1; echo $?)" "1"
+    chk cwmp-parse-nofile  "$(capi_cwmp parse >/dev/null 2>&1; echo $?)" "2"
+    gpv=$(capi_cwmp build-gpv 'Device.DeviceInfo.' 'Device.WiFi.Radio.1.' --out "$d/gpv.xml")
+    chk cwmp-gpv-method    "$(fld "$gpv" method)" "GetParameterValues"
+    chk cwmp-gpv-count     "$(fld "$gpv" parameters)" "2"
+    chk cwmp-gpv-sends     "$(fld "$gpv" transmitted)" "no"
+    chk cwmp-gpv-xml       "$(grep -c '<string>Device.WiFi.Radio.1.</string>' "$d/gpv.xml" 2>/dev/null)" "1"
+    chk cwmp-gpv-parse     "$(capi_cwmp parse "$d/gpv.xml" | awk -F'\t' '$1=="method"{print $2}')" "GetParameterValues"
+    chk cwmp-gpv-dir       "$(capi_cwmp parse "$d/gpv.xml" | awk -F'\t' '$1=="direction"{print $2}')" "acs-to-cpe"
+    chk cwmp-plan-status   "$(capi_cwmp plan | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk cwmp-usage-rc      "$(capi_cwmp >/dev/null 2>&1; echo $?)" "2"
+
+    # ── TR-369 (USP): the named tree, and a schema-free wire dump. The protobuf
+    # tags are not guessed: `wire  unobserved` names usp-msg.proto, which is
+    # not on this machine.
+    local uspo
+    uspo=$(capi_usp build-msg --msg-id m-1 --session-id s-1 --type request --op get \
+            --param-path Device.WiFi. --param-path Device.IP. --max-depth 2)
+    chk usp-msg-type       "$(fld "$uspo" msg_type)" "request"
+    chk usp-msg-op         "$(printf '%s\n' "$uspo" | awk -F'\t' '$1=="request_op"{print $2}')" "get"
+    chk usp-msg-paths      "$(fld "$uspo" param_paths)" "2"
+    chk usp-msg-depth      "$(fld "$uspo" max_depth)" "2"
+    chk usp-msg-id         "$(fld "$uspo" msg_id)" "m-1"
+    chk usp-msg-sends      "$(fld "$uspo" transmitted)" "no"
+    chk usp-wire           "$(fld "$uspo" wire)" "unobserved"
+    chk usp-wire-names     "$(printf '%s\n' "$uspo" | awk -F'\t' '$1=="wire"{print ($3 ~ /usp-msg\.proto/)}')" "1"
+    chk usp-op-set         "$(capi_usp build-msg --op set | awk -F'\t' '$1=="param_paths"{print $2}')" "unobserved"
+    chk usp-bad-type-rc    "$(capi_usp build-msg --type frobnicate >/dev/null 2>&1; echo $?)" "2"
+    chk usp-bad-op-rc      "$(capi_usp build-msg --op frobnicate >/dev/null 2>&1; echo $?)" "2"
+    chk usp-bad-depth-rc   "$(capi_usp build-msg --max-depth x >/dev/null 2>&1; echo $?)" "2"
+    # 0A 03 61 62 63 is field 1, wire type 2, three octets, "abc": the wire
+    # format is mechanical, so this is measured without a schema.
+    local uph
+    uph=$(capi_usp parse 0A03616263); chk usp-parse-rc "$?" "0"
+    chk usp-parse-field    "$(printf '%s\n' "$uph" | awk -F'\t' '$1=="field"{print $2}')" "1"
+    chk usp-parse-wiretype "$(printf '%s\n' "$uph" | awk -F'\t' '$1=="field"{print $3}')" "length-delimited"
+    chk usp-parse-string   "$(printf '%s\n' "$uph" | awk -F'\t' '$1=="field"{print $5}')" "abc"
+    chk usp-parse-names    "$(printf '%s\n' "$uph" | awk -F'\t' '$1=="names"{print $2}')" "unobserved"
+    chk usp-parse-usage    "$(capi_usp parse >/dev/null 2>&1; echo $?)" "2"
+    chk usp-parse-badhex   "$(capi_usp parse zz >/dev/null 2>&1; echo $?)" "2"
+    printf '0A03616263\n' > "$d/usp.hex"
+    chk usp-parse-file     "$(capi_usp parse "$d/usp.hex" | awk -F'\t' '$1=="bytes"{print $2}')" "5"
+    chk usp-plan-status    "$(capi_usp plan | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk usp-usage-rc       "$(capi_usp >/dev/null 2>&1; echo $?)" "2"
+    chk proto-store        "$([[ -s "$CAPI_DIR/cwmp_usp.tsv" ]] && echo yes || echo no)" "yes"
+    chk proto-store-rows   "$(awk -F'\t' '$2=="TR-069"{n++} END{print (n>0)?"yes":"no"}' "$CAPI_DIR/cwmp_usp.tsv" 2>/dev/null)" "yes"
+
     out=$(IMSI_LAB_AUTHORISED=1 capi_cli_main --status-tsv)
 
 
@@ -1464,6 +2049,8 @@ capi_menu() {
   [8]  Plan (handoff)
   [9]  Enumerate requests from a spec (gated)
   [10] Subscriber sequence (gated, handoff)
+  [11] TR-069 (CWMP): build / parse / plan
+  [12] TR-369 (USP): build / parse / plan
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -1483,6 +2070,27 @@ M
                [[ -n "${o:-}" ]] && _ea+=(--out "$o")
                capi_enumerate "${_ea[@]}" "$p"; read -rp "  enter " _ ;;
             10) read -rp "  conf path> " p; capi_enumerate_subscribers "$p"; read -rp "  enter " _ ;;
+            11) echo "  1) build Inform  2) build GetParameterValues  3) parse a file  4) plan"
+                read -rp "  cwmp> " m
+                case "$m" in
+                  1) read -rp "  oui (6 hex, blank=001122)> " o; read -rp "  serial (blank=default)> " sn
+                     capi_cwmp build-inform ${o:+--oui "$o"} ${sn:+--serial "$sn"}; read -rp "  enter " _ ;;
+                  2) read -rp "  param path> " pp; capi_cwmp build-gpv "$pp"; read -rp "  enter " _ ;;
+                  3) read -rp "  file> " f; capi_cwmp parse "$f"; read -rp "  enter " _ ;;
+                  4) capi_cwmp plan; read -rp "  enter " _ ;;
+                  *) warn "invalid"; sleep 1 ;;
+                esac ;;
+            12) echo "  1) build a Msg  2) parse a protobuf dump  3) plan"
+                read -rp "  usp> " m
+                case "$m" in
+                  1) read -rp "  msg id (blank=auto)> " mi; read -rp "  op (blank=get)> " op
+                     read -rp "  param path (blank=none)> " pp
+                     capi_usp build-msg ${mi:+--msg-id "$mi"} ${op:+--op "$op"} ${pp:+--param-path "$pp"}
+                     read -rp "  enter " _ ;;
+                  2) read -rp "  hex or file> " h; capi_usp parse "$h"; read -rp "  enter " _ ;;
+                  3) capi_usp plan; read -rp "  enter " _ ;;
+                  *) warn "invalid"; sleep 1 ;;
+                esac ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1509,6 +2117,8 @@ capi_cli_main() {
         --stuffing)       capi_stuffing_resistance "${1:-}" ;;
         --report)         capi_report ;;
         --plan)           capi_plan ;;
+        --cwmp)           capi_cwmp "$@" ;;
+        --usp)            capi_usp "$@" ;;
         --enumerate)      capi_enumerate "$@" ;;
         --enumerate-subscribers) capi_enumerate_subscribers "$@" ;;
         --execute)        capi_cmd_execute "$@" ;;
@@ -1531,6 +2141,14 @@ Audit verbs (ungated — what a defender can lawfully run):
   --stuffing <conf>            credential-stuffing resistance controls
   --report                     assessment report skeleton
   --plan                       assessment handoff plan
+  --cwmp <mode> [args]         TR-069 (CWMP): build-inform [--oui <6hex>]
+                               [--product-class <s>] [--serial <s>] [--event <code>]
+                               [--acs <url>] [--out <file>] | build-gpv <param>...
+                               [--id <id>] [--out <file>] | parse <file|-> | plan
+  --usp <mode> [args]          TR-369 (USP): build-msg [--msg-id <s>]
+                               [--session-id <s>] [--type error|request|response|notify]
+                               [--op get|get_supported_dm|get_instances|set|add|delete|operate|notify]
+                               [--param-path <p>]... [--max-depth <n>] | parse <hex|file> | plan
 
 Enumeration verbs (build requests, never send them — no gate):
   --enumerate <json> [--base <url>] [--out <run-file>]

@@ -66,6 +66,7 @@ MOD_TMP="$TMP_DIR/traffic_analysis"
 TANA_DIR="$LOOT_DIR/traffic_analysis"
 TANA_REFS="$TANA_DIR/fingerprints.tsv"
 TANA_EVAL="$TANA_DIR/classify.tsv"
+: "${DEFAULT_IDLE:=1.0}"   # seconds; mirrors DEFAULT_IDLE in the engine (was python-only, so --flows <pcap> with no idle arg refused)
 mkdir -p "$MOD_TMP" "$TANA_DIR" 2>/dev/null
 
 # ── sanitisation ────────────────────────────────────────────────────────
@@ -1501,6 +1502,7 @@ tana_cli_status_tsv() {
     printf 'up_down_ratio_defined\t%s\n' 'up_bytes/down_bytes'
     printf 'metric\t%s\n' 'cosine(feature) + timing RBF, combined 0.7/0.3'
     printf 'calls\t%s\n' '--calls-tsv: SRTP call grouping + SIP dialogue match'
+    printf 'ml_classify\t%s\n' '--ml-classify: declared weighted table over port/size/timing; prints the table, names features, unobserved when one is missing'
     printf 'attack_coverage\tP4,P5,P19\n'
     printf 'radio_required\tno\n'
 }
@@ -1569,6 +1571,194 @@ tana_cmd_clear_refs() {
 # The synthetic captures below are written by hand, record by record, so
 # every packet size and timestamp in the assertions is a value this test
 # chose rather than a value the parser reported.
+# ── --ml-classify: a declared weighted table, not a trained model ───────
+# --classify is nearest-neighbour against stored fingerprints; it needs a
+# reference set first and numpy for the signal maths. This verb is the other
+# kind of classifier: a small table of weights somebody wrote down, scored
+# against the port / size / timing columns --flows already prints. There is
+# no training step, so there is nothing to overfit -- and nothing to trust
+# either. Every table entry is printed with every verdict, because a
+# classifier whose model you cannot read is a rumour.
+#
+# Doctrine: a score is INFERRED. It is neither measured (a port is a claim the
+# capture carried) nor advertised (nothing here speaks for itself). A flow
+# whose features are missing -- a single-packet flow has no inter-arrival
+# time -- is scored on what exists and the missing feature is NAMED as
+# unobserved in the row. A flow no rule matches is `unobserved`, with the
+# reason, not silently assigned to the nearest class.
+tana_ml_rules() {
+    cat <<'T'
+class	feature	op	value	weight
+dns	port	eq	53	3.0
+dns	proto	eq	UDP	0.5
+dns	mean_size	lt	200	0.5
+dns	packets	lt	10	0.5
+sip-ims	port	eq	5060	3.0
+sip-ims	port	eq	5061	3.0
+sip-ims	proto	eq	UDP	0.3
+sip-ims	mean_size	ge	200	0.4
+sip-ims	mean_size	lt	1400	0.4
+tls	port	eq	443	2.0
+tls	port	eq	8443	1.5
+tls	proto	eq	TCP	1.0
+tls	mean_size	ge	500	0.5
+http	port	eq	80	2.0
+http	port	eq	8080	1.5
+http	proto	eq	TCP	0.5
+gtp	port	eq	2123	3.0
+gtp	port	eq	2152	3.0
+gtp	proto	eq	UDP	0.2
+ntp	port	eq	123	3.0
+ntp	proto	eq	UDP	0.5
+ntp	packets	lt	5	0.3
+diameter	port	eq	3868	3.0
+diameter	port	eq	3869	3.0
+rtp-media	port	between	16384-32767	1.5
+rtp-media	proto	eq	UDP	0.5
+rtp-media	mean_size	between	100-400	0.5
+rtp-media	rate	gt	20	0.4
+quic	port	eq	443	1.5
+quic	proto	eq	UDP	1.5
+T
+}
+
+tana_cmd_ml_classify() {
+    local f="${1:-}" idle="${2:-$DEFAULT_IDLE}"
+    [[ -n "$f" ]] || { printf 'ERROR\tusage: --ml-classify <pcap> [idle-s]\n' >&2; return 2; }
+    [[ "$idle" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\tidle threshold must be a number of seconds\n' >&2; return 2; }
+    tana_check_file "$f" || return $?
+    local flows rc rules
+    flows=$(tana_run flows "$f" "$idle"); rc=$?
+    if (( rc != 0 )) || [[ -z "$flows" ]]; then
+        printf 'ERROR\t--flows refused or produced nothing for this capture (rc %s)\n' "$rc" >&2
+        printf 'WHY\ta classification is built on the flow table; with no flow table every class is unobserved, not clean\n' >&2
+        return 1
+    fi
+    rules="$MOD_TMP/ml_rules.tsv"
+    tana_ml_rules > "$rules"
+    local nrows; nrows=$(awk -F'\t' 'NR>1 && $1!=""' "$rules" | grep -c . || true)
+    printf 'model\t%s\n' "inferred"
+    printf 'basis\t%s\n' "a declared weighted table over port/size/timing features; a score is inference from a written-down model, not a measurement of the traffic"
+    printf 'rules\t%s\t%s\n' "$nrows" "$rules"
+    awk -F'\t' 'NR>1 && $1!=""{printf "rule\t%s\t%s\t%s\t%s\t%s\n", $1,$2,$3,$4,$5}' "$rules"
+
+    local out
+    out=$(printf '%s\n' "$flows" | awk -F'\t' -v rules="$rules" '
+        BEGIN {
+            while ((getline l < rules) > 0) {
+                if (l == "" || l ~ /^#/) continue
+                split(l, f, "\t")
+                if (f[1] == "class") continue
+                n++
+                RC[n] = f[1]; RF[n] = f[2]; RO[n] = f[3]; RV[n] = f[4]; RW[n] = f[5] + 0
+                UF[f[1] SUBSEP f[2]] = 1
+            }
+        }
+        function port_of(ep,   p) {
+            p = ep; sub(/^.*:/, "", p)
+            return (p ~ /^[0-9]+$/) ? p + 0 : -1
+        }
+        function num(x) { return (x ~ /^[0-9]+(\.[0-9]+)?$/) ? x + 0 : "" }
+        function cmp(v, op, want,   w, bb) {
+            if (op == "between") { split(want, bb, "-"); return (v >= bb[1] + 0 && v <= bb[2] + 0) }
+            w = want + 0
+            if (op == "eq") return (v == w)
+            if (op == "lt") return (v <  w)
+            if (op == "le") return (v <= w)
+            if (op == "gt") return (v >  w)
+            if (op == "ge") return (v >= w)
+            return 0
+        }
+        function note(c, s) { if (!(c, s) in SEEN) { SEEN[c, s] = 1; M[c] = (M[c] == "" ? s : M[c] " " s) } }
+        $1 == "summary" { next }
+        $1 == "idx" { next }
+        {
+            idx = $1; a = $2; b = $3
+            # The engine prints the IP protocol number; name it, and keep an
+            # unknown number as itself rather than guessing a name for it.
+            proto = toupper($4)
+            if (proto == "6") proto = "TCP"
+            else if (proto == "17") proto = "UDP"
+            else if (proto == "132") proto = "SCTP"
+            pkts = num($5); dur = num($11); msz = num($12); burst = num($13)
+            pa = port_of(a); pb = port_of(b)
+            rate = (dur != "" && dur > 0) ? pkts / dur : ""
+            delete S; delete M; delete U; delete SEEN; delete ANCHOR
+            for (i = 1; i <= n; i++) {
+                v = ""
+                if (RF[i] == "port") {
+                    if (pa < 0 && pb < 0) { U["port"] = 1; continue }
+                    okv = 0; hit = ""
+                    if (pa >= 0 && cmp(pa, RO[i], RV[i])) { okv = 1; hit = pa }
+                    if (pb >= 0 && cmp(pb, RO[i], RV[i])) { okv = 1; if (hit == "") hit = pb }
+                    if (okv) { S[RC[i]] += RW[i]; ANCHOR[RC[i]] = 1; note(RC[i], "port:" hit) }
+                    continue
+                }
+                if (RF[i] == "proto") {
+                    if (proto == "") { U["proto"] = 1; continue }
+                    if (proto == toupper(RV[i])) { S[RC[i]] += RW[i]; note(RC[i], "proto:" proto) }
+                    continue
+                }
+                if (RF[i] == "mean_size") v = msz
+                else if (RF[i] == "packets") v = pkts
+                else if (RF[i] == "rate") v = rate
+                else if (RF[i] == "bursts") v = burst
+                else { U[RF[i]] = 1; continue }
+                if (v == "") { U[RF[i]] = 1; continue }
+                if (cmp(v, RO[i], RV[i])) { S[RC[i]] += RW[i]; note(RC[i], RF[i] ":match") }
+            }
+            best = ""; bs = -1; second = ""; ss = -1
+            for (c in S) {
+                if (S[c] > bs) { second = best; ss = bs; best = c; bs = S[c] }
+                else if (S[c] > ss) { second = c; ss = S[c] }
+            }
+            miss = ""
+            for (k in U) {
+                # Only a feature the chosen class actually uses is worth
+                # naming: a missing inter-arrival time says nothing about a
+                # DNS verdict, and printing it there would be noise.
+                if (best != "" && !((best SUBSEP k) in UF)) continue
+                miss = miss (miss == "" ? "" : ",") k
+            }
+            # A class needs a port anchor: a port number is the only feature
+            # here that identifies a service rather than describing a shape,
+            # so a protocol match alone never promotes a flow into a class.
+            if (best != "" && !(best in ANCHOR)) { second = best; ss = bs; best = ""; bs = -1 }
+            if (best == "" || bs < 1.0) {
+                printf "flow\t%s\t%s\t%s\tunobserved\t0.0\t-\t-\t-\t%s\tthe best declared class scored below the 1.0 floor or had no port anchor: grey, not clean\n", idx, a, b, (miss == "" ? "none" : miss)
+            } else {
+                ru = (second == "" || ss <= 0) ? "-" : sprintf("%s(%.2f)", second, ss)
+                mg = (second == "" || ss <= 0) ? "-" : sprintf("%.2f", bs - ss)
+                printf "flow\t%s\t%s\t%s\t%s\t%.2f\t%s\t%s\t%s\t%s\tinferred\n", idx, a, b, best, bs, ru, mg, M[best], (miss == "" ? "none" : miss)
+            }
+            nclassified = (best != "" && bs >= 1.0) ? nclassified + 1 : nclassified
+            nflows++
+        }
+        END {
+            printf "summary\tflows\t%d\n", nflows + 0
+            printf "summary\tclassified\t%d\n", nclassified + 0
+            printf "summary\tunobserved\t%d\n", (nflows + 0) - (nclassified + 0)
+        }')
+    printf '%s\n' "$out"
+    # Append-only store: one row per classified flow.
+    local store ts
+    store="$TANA_DIR/ml_classify.tsv"
+    mkdir -p "$TANA_DIR" 2>/dev/null
+    [[ -f "$store" ]] || printf 'ts\tpcap\tflow\ta\tb\tclass\tscore\trunner_up\tmargin\tbasis\tunobserved_features\n' > "$store"
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf '%s\n' "$out" | awk -F'\t' -v ts="$ts" -v p="$(tana_sanitize "$f")" \
+        '$1=="flow" && $5!="unobserved"{printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tinferred\t%s\n", ts,p,$2,$3,$4,$5,$6,$7,$8,$10}' >> "$store"
+    printf 'store\t%s\n' "$store"
+    local nc
+    nc=$(printf '%s\n' "$out" | awk -F'\t' '$1=="summary" && $2=="classified"{print $3}')
+    if [[ "${nc:-0}" -eq 0 ]]; then
+        printf 'WHY\tno flow in this capture matched a declared rule. That is unobserved, not clean: the table is small on purpose and says so\n' >&2
+        return 1
+    fi
+    return 0
+}
+
 tana_selftest() {
     local bad=0 npass=0
     chk() {
@@ -2051,6 +2241,129 @@ PYFIX
     chk clear-refs-rc "$(tana_refs_tsv >/dev/null 2>&1; echo $?)" "1"
 
     printf 'assertions\t%s\n' "$(( npass + bad ))"
+    # ── --ml-classify: a declared table, scored, with grey kept grey ────
+    # The four captures below carry exactly the features the table reads, so
+    # every score in the assertions is a sum this test can recompute by hand.
+    # A fifth capture exists only to prove that a flow nothing matches comes
+    # back unobserved and that the verb refuses instead of guessing.
+    local mlp="$d/ml"
+    mkdir -p "$mlp"
+    python3 - "$mlp" << 'PYML'
+import struct, sys, os
+def frame(payload_len, sport, dport, tcp=False):
+    payload = bytes([0x41 + (i % 26) for i in range(payload_len)])
+    if tcp:
+        l4 = struct.pack(">HHIIBBHHH", sport, dport, 1, 0, 0x50, 0x18, 8192, 0, 0) + payload
+        proto = 6
+    else:
+        l4 = struct.pack(">HHHH", sport, dport, 8 + len(payload), 0) + payload
+        proto = 17
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(l4), 0x1234, 0, 64,
+                     proto, 0, bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2]))
+    return bytes.fromhex("0200000000010200000000020800") + ip + l4
+def write(path, recs, tcp=False):
+    with open(path, "wb") as fh:
+        fh.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 262144, 1))
+        for payload, off, sp, dp in recs:
+            f = frame(payload, sp, dp, tcp)
+            sec = 1700000000 + int(off)
+            usec = int(round((off - int(off)) * 1e6))
+            fh.write(struct.pack("<IIII", sec, usec, len(f), len(f)))
+            fh.write(f)
+d = sys.argv[1]
+write(os.path.join(d, "dns.pcap"), [(60, 0.0, 40000, 53), (80, 0.02, 53, 40000)])
+write(os.path.join(d, "sip.pcap"), [(300, 0.0, 40000, 5060), (320, 0.01, 5060, 40000),
+                                    (310, 0.02, 40000, 5060), (330, 0.03, 5060, 40000)])
+write(os.path.join(d, "tls.pcap"), [(600, 0.0, 40000, 443), (700, 0.05, 443, 40000),
+                                    (800, 0.10, 40000, 443), (900, 0.15, 443, 40000)], tcp=True)
+write(os.path.join(d, "none.pcap"), [(120, 0.0, 40000, 9999), (130, 0.01, 9999, 40000)])
+write(os.path.join(d, "rtp1.pcap"), [(200, 0.0, 40000, 20000)])
+PYML
+    chk ml-fixtures "$(ls "$mlp"/*.pcap 2>/dev/null | grep -c . || true)" "5"
+
+    local mlout mlrc
+    mlout=$(tana_cmd_ml_classify "$mlp/dns.pcap"); mlrc=$?
+    chk ml-dns-rc      "$mlrc" "0"
+    chk ml-dns-class   "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $5; exit}')" "dns"
+    chk ml-dns-score   "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $6; exit}')" "4.50"
+    # 3.0 port + 0.5 proto + 0.5 size + 0.5 packets, recomputed by hand.
+    chk ml-dns-feats   "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $9; exit}')" "port:53 proto:UDP mean_size:match packets:match"
+    chk ml-dns-basis   "$(printf '%s\n' "$mlout" | grep -c '^model	inferred')" "1"
+    chk ml-table-rows  "$(printf '%s\n' "$mlout" | grep -c '^rule	')" "30"
+    chk ml-summary     "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="summary" && $2=="classified"{print $3}')" "2"
+
+    mlout=$(tana_cmd_ml_classify "$mlp/sip.pcap")
+    chk ml-sip-class   "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $5; exit}')" "sip-ims"
+    mlout=$(tana_cmd_ml_classify "$mlp/tls.pcap")
+    chk ml-tls-class   "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $5; exit}')" "tls"
+    chk ml-tls-proto   "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print ($9 ~ /proto:TCP/) ? "tcp" : "not-tcp"; exit}')" "tcp"
+
+    # A single-packet flow has no inter-arrival time, so the timing feature the
+    # rtp rule reads is missing: the class still scores, and the row SAYS which
+    # feature it could not see.
+    mlout=$(tana_cmd_ml_classify "$mlp/rtp1.pcap")
+    chk ml-rtp-class   "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $5; exit}')" "rtp-media"
+    chk ml-rtp-missing "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $10; exit}')" "rate"
+
+    # Nothing in the table matches port 9999: unobserved, and rc 1.
+    mlout=$(tana_cmd_ml_classify "$mlp/none.pcap" 2>/dev/null); mlrc=$?
+    chk ml-none-rc    "$mlrc" "1"
+    chk ml-none-class "$(printf '%s\n' "$mlout" | awk -F'\t' '$1=="flow"{print $5; exit}')" "unobserved"
+    chk ml-none-why   "$(printf '%s\n' "$mlout" | grep -c 'grey, not clean')" "2"
+    chk ml-usage-rc   "$(tana_cmd_ml_classify >/dev/null 2>&1; echo $?)" "2"
+    chk ml-missing-rc "$(tana_cmd_ml_classify "$mlp/nothere.pcap" >/dev/null 2>&1; echo $?)" "1"
+    chk ml-idle-rc    "$(tana_cmd_ml_classify "$mlp/dns.pcap" "abc" >/dev/null 2>&1; echo $?)" "2"
+    chk ml-store-hdr  "$(head -1 "$TANA_DIR/ml_classify.tsv" 2>/dev/null | cut -f1)" "ts"
+    local mlrows; mlrows=$(awk -F'\t' 'NR>1' "$TANA_DIR/ml_classify.tsv" 2>/dev/null | grep -c . || true)
+    chk ml-store-rows "$(( mlrows >= 5 ))" "1"
+    # The unobserved flows are NOT in the store: a grey answer is reported, not
+    # filed as an observation.
+    chk ml-store-grey "$(awk -F'\t' 'NR>1 && $6=="unobserved"' "$TANA_DIR/ml_classify.tsv" 2>/dev/null | grep -c . || true)" "0"
+
+    # ── --export: one protocol's flows, or a named reason ───────────────
+    chk export-usage    "$(tana_cmd_export >/dev/null 2>&1; echo $?)" "2"
+    chk export-badproto "$(tana_cmd_export nope "$mlp/dns.pcap" >/dev/null 2>&1; echo $?)" "2"
+    chk export-nofile   "$(tana_cmd_export sip /nope.pcap >/dev/null 2>&1; echo $?)" "1"
+    chk export-proto-list "$(tana_export_protos)" "sip diameter dns gtp"
+    local fbin="$d/fakebin" tool
+    mkdir -p "$fbin"
+    for tool in awk wc date sed tr mkdir cat cut grep basename dirname rm sort head tail mktemp cp; do
+        [[ -n "$(command -v "$tool" 2>/dev/null)" ]] && ln -sf "$(command -v "$tool")" "$fbin/$tool" 2>/dev/null
+    done
+    chk export-no-tshark "$(PATH="$fbin" tana_cmd_export dns "$mlp/dns.pcap" >/dev/null 2>&1; echo $?)" "3"
+    chk export-no-tshark-names \
+        "$(PATH="$fbin" tana_cmd_export dns "$mlp/dns.pcap" 2>&1 >/dev/null | grep -c 'no tshark on PATH')" "1"
+    if command -v tshark >/dev/null 2>&1; then
+        # The fixture carries two one-packet DNS flows, so the export finds two
+        # and neither has a duration: bytes_per_s is unobserved in both rows,
+        # which is the grey answer -- not a rate of 0 bytes/s.
+        chk export-dns-rows "$(tana_cmd_export dns "$mlp/dns.pcap" 2>/dev/null | grep -c .)" "3"
+        chk export-dns-grey \
+            "$(tana_cmd_export dns "$mlp/dns.pcap" 2>/dev/null | awk -F'\t' '$1 != "flow" && $12 != "unobserved"' | grep -c .)" "0"
+        chk export-dns-note \
+            "$(tana_cmd_export dns "$mlp/dns.pcap" 2>&1 >/dev/null | grep -c 'bytes_per_s is unobserved')" "1"
+        chk export-out-rc "$(tana_cmd_export dns "$mlp/dns.pcap" "$d/e.tsv" >/dev/null 2>&1; echo $?)" "0"
+        chk export-out-hdr "$(head -1 "$d/e.tsv" | cut -f1,12)" "flow	bytes_per_s"
+        chk export-out-rows "$(tail -n +2 "$d/e.tsv" | grep -c .)" "2"
+        chk export-store "$(( $(awk -F'\t' '$2=="export"' "$TANA_DIR/exports.tsv" 2>/dev/null | wc -l | tr -d ' ') >= 3 ))" "1"
+    else
+        chk export-tshark-absent "$(command -v tshark >/dev/null 2>&1; echo $?)" "1"
+    fi
+
+    # ── --html: one file, nothing in it can fetch anything ──────────────
+    local hrep="$d/report.html"
+    chk html-usage  "$(tana_cmd_html >/dev/null 2>&1; echo $?)" "2"
+    chk html-nofile "$(tana_cmd_html /nope.pcap >/dev/null 2>&1; echo $?)" "1"
+    chk html-rc     "$(tana_cmd_html "$mlp/dns.pcap" "$hrep" >/dev/null 2>&1; echo $?)" "0"
+    chk html-doctype "$(head -1 "$hrep")" "<!DOCTYPE html>"
+    chk html-no-external "$(grep -c -iE 'http://|https://|<script|<img|<link|@import' "$hrep")" "0"
+    chk html-inline-style "$(grep -c '<style>' "$hrep")" "1"
+    chk html-provenance "$(grep -c '<h2>provenance</h2>' "$hrep")" "1"
+    # The declared table is in the report, so a reader sees what scored a flow.
+    chk html-feature-table "$(grep -c '<h2>feature</h2>' "$hrep")" "1"
+    chk html-feature-named "$(grep -c 'dns.port eq 53' "$hrep")" "1"
+    chk html-writer "$(python3 "$IMSISTING_ROOT/tools/html-report.py" --selftest 2>/dev/null | tail -1)" "RESULT	PASS"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2068,8 +2381,11 @@ tana_menu() {
   [2]  flow features (sizes, timings, bursts, shaping)
   [3]  add a fingerprint from a pcap
   [4]  classify a pcap against the reference set
-  [5]  list reference fingerprints
-  [6]  clear the reference set
+  [5]  classify with the declared weighted table (no reference set)
+  [6]  list reference fingerprints
+  [7]  clear the reference set
+  [x]  protocol-specific flow export (sip|diameter|dns|gtp)
+  [h]  self-contained HTML report
   [0]  back
 
 M
@@ -2094,9 +2410,24 @@ M
                 read -rp "  k [3]> " k
                 tana_cmd_classify "$p" "${k:-3}" | column -t -s$'\t' 2>/dev/null || tana_cmd_classify "$p" "${k:-3}"
                 read -rp "  press enter " _ ;;
-            5) tana_refs_tsv | column -t -s$'\t' 2>/dev/null || tana_refs_tsv
+            5)
+                read -rp "  pcap path> " p
+                tana_cmd_ml_classify "$p" | column -t -s$'\t' 2>/dev/null || tana_cmd_ml_classify "$p"
+                read -rp "  press enter " _ ;;
+            6) tana_refs_tsv | column -t -s$'\t' 2>/dev/null || tana_refs_tsv
                read -rp "  press enter " _ ;;
-            6) tana_clear_refs; sleep 1 ;;
+            7) tana_clear_refs; sleep 1 ;;
+            x)
+                read -rp "  proto (sip|diameter|dns|gtp)> " w
+                read -rp "  pcap path> " p
+                read -rp "  out.tsv (blank = stdout)> " o
+                tana_cmd_export "$w" "$p" "$o" | column -t -s$'\t' 2>/dev/null || tana_cmd_export "$w" "$p" "$o"
+                read -rp "  press enter " _ ;;
+            h)
+                read -rp "  pcap path> " p
+                read -rp "  out.html (blank = loot)> " o
+                tana_cmd_html "$p" "$o"
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2104,6 +2435,156 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── --export: one protocol's flows, in the classifier's own vocabulary ──
+# The protocol-specific export for this module is not a field dump: it is the
+# flow table for ONE application protocol, with the same features the
+# declared table in --ml-classify scores (port pair, bytes, duration, packet
+# count). That makes the export the feature source for the classifier rather
+# than a second, unrelated view of the same capture.
+#
+# The dissector is tshark's (4.2.2 dissects SIP, Diameter, DNS and GTP); this
+# module will not hand-decode them and then call the result measured. With no
+# tshark the export refuses with exit 3 and says which tool is missing.
+tana_export_protos() { printf 'sip diameter dns gtp'; }
+
+tana_export_fields() {
+    # Fixed by what a flow row needs: who, where, how much, how long.
+    printf 'frame.number frame.time_relative ip.src ip.dst udp.srcport udp.dstport tcp.srcport tcp.dstport frame.len'
+}
+
+tana_cmd_export() {
+    local proto="${1:-}" f="${2:-}" out="${3:-}"
+    [[ -n "$proto" ]] || {
+        printf 'ERROR\tusage: --export <sip|diameter|dns|gtp> <pcap> [out.tsv]\n' >&2; return 2; }
+    case "$proto" in sip|diameter|dns|gtp) ;; *)
+        printf 'ERROR\texport refuses proto "%s": this module exports %s\n' \
+            "$(tana_sanitize "$proto")" "$(tana_export_protos)" >&2; return 2 ;; esac
+    [[ -n "$f" ]] || { printf 'ERROR\tusage: --export %s <pcap> [out.tsv]\n' "$proto" >&2; return 2; }
+    [[ -f "$f" ]] || { printf 'ERROR\tno such capture: %s\n' "$(tana_sanitize "$f")" >&2; return 1; }
+    [[ -s "$f" ]] || { printf 'ERROR\t%s is empty\n' "$(tana_sanitize "$f")" >&2; return 1; }
+
+    if ! command -v tshark >/dev/null 2>&1; then
+        printf 'unobserved\t%s\tflows\tno tshark on PATH: %s dissection is tshark\x27s job and this module will not guess it\n' \
+            "$proto" "$proto" >&2
+        printf 'handoff\tinstall tshark (4.2.2) or use --flows for the L3/L4 view this module parses itself\n' >&2
+        return 3
+    fi
+
+    local tmp; tmp=$(mktemp "$MOD_TMP/export.XXXXXX") || {
+        printf 'ERROR\tcannot create a temp file under %s\n' "$MOD_TMP" >&2; return 1; }
+    tshark -r "$f" -Y "$proto" -T fields \
+        -e frame.number -e frame.time_relative -e ip.src -e ip.dst \
+        -e udp.srcport -e udp.dstport -e tcp.srcport -e tcp.dstport -e frame.len \
+        -E separator=/t -E occurrence=f > "$tmp" 2>/dev/null
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        rm -f "$tmp"
+        printf 'ERROR\ttshark could not read %s (exit %d)\n' "$(tana_sanitize "$f")" "$rc" >&2
+        return 1
+    fi
+
+    {
+        printf 'flow\tproto\tsrc\tsport\tdst\tdport\tpackets\tbytes\tfirst_s\tlast_s\tdur_s\tbytes_per_s\n'
+        awk -F'\t' -v p="$proto" '
+            NF >= 9 && $9 != "" {
+                sport = ($5 != "" ? $5 : $7); dport = ($6 != "" ? $6 : $8)
+                # Diameter over SCTP carries no UDP/TCP port; keying that flow
+                # on addresses alone is honest, so the port columns say "-".
+                if (sport == "") sport = "-"
+                if (dport == "") dport = "-"
+                k = $3 SUBSEP sport SUBSEP $4 SUBSEP dport
+                if (!(k in n)) { n[k] = 0; b[k] = 0; t0[k] = $2 + 0; t1[k] = $2 + 0
+                                 s[k] = $3; sp[k] = sport; d[k] = $4; dp[k] = dport }
+                n[k]++; b[k] += $9
+                if ($2 + 0 < t0[k]) t0[k] = $2 + 0
+                if ($2 + 0 > t1[k]) t1[k] = $2 + 0
+            }
+            END {
+                i = 0
+                for (k in n) {
+                    i++
+                    dur = t1[k] - t0[k]
+                    rate = (dur > 0 ? sprintf("%.1f", b[k] / dur) : "unobserved")
+                    printf "f%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.6f\t%.6f\t%.6f\t%s\n",
+                        i, p, s[k], sp[k], d[k], dp[k], n[k], b[k], t0[k], t1[k], dur, rate
+                }
+            }' "$tmp" | sort -t$'\t' -k8,8nr
+    } > "$tmp.rows"
+    rm -f "$tmp"
+
+    local nrows; nrows=$(tail -n +2 "$tmp.rows" | grep -c . || true)
+    if [[ "${nrows:-0}" -eq 0 ]]; then
+        printf 'unobserved\t%s\tflows\tno %s frame in this capture: nothing was exported rather than a header-only zero\n' \
+            "$proto" "$proto" >&2
+    fi
+    # A flow with no measurable duration has no rate, and says so per row
+    # (bytes_per_s = unobserved) instead of a fabricated 0.
+    if [[ "${nrows:-0}" -gt 0 ]]; then
+        printf 'export\t%s\t%s flows\tbytes_per_s is unobserved where durations were 0\n' "$proto" "$nrows" >&2
+    fi
+
+    if [[ -n "$out" ]]; then
+        cp "$tmp.rows" "$out" || { rm -f "$tmp.rows"; printf 'ERROR\tcannot write %s\n' "$(tana_sanitize "$out")" >&2; return 1; }
+        printf 'export\t%s\t%s\t%s flows\n' "$proto" "$(tana_sanitize "$out")" "$nrows"
+    else
+        cat "$tmp.rows"
+    fi
+    rm -f "$tmp.rows"
+    mkdir -p "$TANA_DIR" 2>/dev/null
+    printf '%s\texport\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$proto" "$nrows" \
+        >> "$TANA_DIR/exports.tsv" 2>/dev/null || true
+    return 0
+}
+
+# ── --html: flows and the declared table, in one offline file ───────────
+# tools/html-report.py writes it: inline stylesheet, no script, no link, no
+# image, no URL -- so the report cannot phone home and cannot break when a
+# CDN moves. An `unobserved` value renders in the grey class.
+tana_cmd_html() {
+    local f="${1:-}" out="${2:-}"
+    [[ -n "$f" ]] || { printf 'ERROR\tusage: --html <pcap> [out.html]\n' >&2; return 2; }
+    [[ -f "$f" ]] || { printf 'ERROR\tno such capture: %s\n' "$(tana_sanitize "$f")" >&2; return 1; }
+    local writer="$IMSISTING_ROOT/tools/html-report.py"
+    [[ -f "$writer" ]] || {
+        printf 'ERROR\tunobserved: the report writer is missing at %s\n' "$writer" >&2; return 1; }
+    mkdir -p "$TANA_DIR" 2>/dev/null
+    out="${out:-$TANA_DIR/report_$(date -u +%Y%m%dT%H%M%SZ).html}"
+
+    {
+        printf 'provenance\tcapture\t%s\targument\n' "$(tana_sanitize "$f")"
+        printf 'provenance\tbytes\t%s\tsize on disk\n' "$(wc -c < "$f" | tr -d ' ')"
+        printf 'provenance\ttshark\t%s\toptional dissector\n' \
+            "$(command -v tshark 2>/dev/null || echo none)"
+        printf 'doctrine\tunobserved\tunobserved\ta feature this module did not measure is absent here, never printed as a zero\n'
+        # The declared table the classifier scores against (item: name the
+        # features), so the report explains its own verdicts.
+        tana_ml_rules 2>/dev/null | awk -F'\t' '
+            $1 == "class" { next }
+            NF >= 5 { printf "feature\t%s.%s %s %s\tweight %s\tdeclared table of --ml-classify\n", $1, $2, $3, $4, $5 }'
+        # One flow table per protocol that actually appears in the capture.
+        local p
+        for p in sip diameter dns gtp; do
+            tana_cmd_export "$p" "$f" 2>/dev/null | awk -F'\t' -v p="$p" '
+                $1 == "flow" { next }
+                NF >= 12 { printf "flow %s\t%s:%s -> %s:%s\t%s packets\t%s bytes over %ss (%s B/s)\n",
+                                  p, $3, $4, $5, $6, $7, $8, $11, $12 }'
+        done
+        tana_cmd_flows "$f" 2>/dev/null | awk -F'\t' '
+            $1 == "flow" || $1 == "F" { printf "l4 flow\t%s\t%s\t%s\n", $2, $3, $4 }'
+    } | python3 "$writer" --title "Traffic analysis - $(basename "$f")" \
+            --source "$(tana_sanitize "$f")" \
+            --generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$out"
+    local rc=$?
+    [[ $rc -ne 0 || ! -s "$out" ]] && {
+        printf 'ERROR\tthe report writer failed (exit %d); nothing was written to %s\n' \
+            "$rc" "$(tana_sanitize "$out")" >&2; return 1; }
+    printf 'report\t%s\t%s bytes\tself-contained: no script, no link, no external asset\n' \
+        "$(tana_sanitize "$out")" "$(wc -c < "$out" | tr -d ' ')"
+    printf '%s\thtml\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(tana_sanitize "$out")" \
+        >> "$TANA_DIR/exports.tsv" 2>/dev/null || true
+    return 0
+}
+
 tana_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -2114,6 +2595,9 @@ tana_cli_main() {
         --features)       tana_cmd_features "${1:-}" "${2:-}" "${3:-}" ;;
         --fingerprint-add) tana_cmd_fingerprint_add "${1:-}" "${2:-}" ;;
         --classify)       tana_cmd_classify "${1:-}" "${2:-}" ;;
+        --ml-classify)    tana_cmd_ml_classify "${1:-}" "${2:-}" ;;
+        --export)         tana_cmd_export "${1:-}" "${2:-}" "${3:-}" ;;
+        --html)           tana_cmd_html "${1:-}" "${2:-}" ;;
         --refs-tsv)       tana_refs_tsv ;;
         --clear-refs)     tana_cmd_clear_refs ;;
         --selftest)       tana_selftest ;;
@@ -2136,6 +2620,19 @@ Usage: $0 COMMAND
                                       matched to a SIP dialogue's SDP
   --fingerprint-add <name> <pcap>     store a reference fingerprint
   --classify <pcap> [k]               top-k against the reference set
+  --ml-classify <pcap> [idle-s]       classify with a declared weighted table
+                                      over port/size/timing features; the table is
+                                      printed, features used are named, and a flow
+                                      lacking one prints it as unobserved
+  --export <proto> <pcap> [out.tsv]   one protocol's flows (sip, diameter,
+                                      dns, gtp) as TSV, in the same feature
+                                      vocabulary --ml-classify scores; a flow
+                                      with no measurable duration reports
+                                      bytes_per_s as unobserved
+  --html <pcap> [out.html]            self-contained HTML report (inline style,
+                                      no script, no external asset): the declared
+                                      feature table, the per-protocol flows and
+                                      the L4 flow summary of that capture
   --refs-tsv                          stored fingerprints as TSV
   --clear-refs                        empty the fingerprint store
   --selftest                          verify the parser and metrics offline

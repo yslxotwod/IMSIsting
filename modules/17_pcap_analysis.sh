@@ -1438,6 +1438,65 @@ PYEOF
     chk node-unknown     "$(CASEBOOK_DIR="$d/nobook" pcap_cmd_node no-such >/dev/null 2>&1; echo $?)" "2"
     chk node-fetch-args  "$(pcap_cmd_node_fetch onlyname >/dev/null 2>&1; echo $?)" "2"
 
+    # ── 13. --export: a protocol's fields, or a named reason ────────────
+    chk export-usage    "$(pcap_cmd_export >/dev/null 2>&1; echo $?)" "2"
+    chk export-badproto "$(pcap_cmd_export nope "$pcap" >/dev/null 2>&1; echo $?)" "2"
+    chk export-nofile   "$(pcap_cmd_export sip /nope.pcap >/dev/null 2>&1; echo $?)" "1"
+    chk export-proto-list "$(pcap_export_protos)" "sip diameter dns gtp"
+
+    # Without tshark there is no dissector, and the exporter says so instead of
+    # emitting a header full of blanks: rc 3 (handoff) plus an unobserved row.
+    local fbin="$d/fakebin"
+    mkdir -p "$fbin"
+    local tool
+    for tool in awk wc od date sed tr mkdir cat cut grep basename dirname rm \
+                stat ls sort head tail cmp mktemp; do
+        [[ -n "$(command -v "$tool" 2>/dev/null)" ]] && ln -sf "$(command -v "$tool")" "$fbin/$tool" 2>/dev/null
+    done
+    chk export-no-tshark   "$(PATH="$fbin" pcap_cmd_export sip "$pcap" >/dev/null 2>&1; echo $?)" "3"
+    chk export-no-tshark-names-relay \
+        "$(PATH="$fbin" pcap_cmd_export sip "$pcap" 2>&1 >/dev/null | grep -c 'no tshark on PATH')" "1"
+    chk export-no-tshark-unobserved \
+        "$(PATH="$fbin" pcap_cmd_export sip "$pcap" 2>&1 >/dev/null | grep -c '^unobserved')" "1"
+
+    if command -v tshark >/dev/null 2>&1; then
+        # The sample carries one Diameter message, so a Diameter export has a
+        # header and exactly one data row; its optional AVPs are absent and
+        # each one is reported unobserved rather than left blank and silent.
+        out=$(pcap_cmd_export diameter "$pcap" 2>"$d/ex.err")
+        chk export-diameter-header \
+            "$(head -1 <<<"$out" | tr '\t' ' ')" \
+            "frame.number frame.time_epoch ip.src ip.dst diameter.cmd.code diameter.applicationId diameter.Session-Id diameter.Result-Code diameter.Origin-Host diameter.Destination-Host diameter.Origin-Realm diameter.Destination-Realm"
+        chk export-diameter-rows "$(tail -n +2 <<<"$out" | grep -c .)" "1"
+        chk export-diameter-cmd  "$(tail -1 <<<"$out" | cut -f5)" "316"
+        chk export-diameter-unobserved \
+            "$(grep -c '^unobserved.*diameter.Session-Id' "$d/ex.err")" "1"
+        chk export-dns-header-only "$(pcap_cmd_export dns "$pcap" 2>/dev/null | grep -c .)" "1"
+        chk export-out-file "$(pcap_cmd_export dns "$pcap" "$d/dns.tsv" >/dev/null 2>&1; echo $?)" "0"
+        chk export-out-written "$(grep -c . "$d/dns.tsv")" "1"
+        chk export-store \
+            "$(( $(awk -F'\t' '$2=="export"' "$PCAP_DIR/exports.tsv" | wc -l | tr -d ' ') >= 2 ))" "1"
+    else
+        chk export-tshark-absent "$(command -v tshark >/dev/null 2>&1; echo $?)" "1"
+    fi
+
+    # ── 14. --html: one file, and nothing in it can reach the network ───
+    chk html-usage  "$(pcap_cmd_html >/dev/null 2>&1; echo $?)" "2"
+    chk html-nofile "$(pcap_cmd_html /nope.pcap >/dev/null 2>&1; echo $?)" "1"
+    local rep="$d/report.html"
+    chk html-rc     "$(pcap_cmd_html "$pcap" "$rep" >/dev/null 2>&1; echo $?)" "0"
+    chk html-exists "$([[ -s "$rep" ]] && echo yes || echo no)" "yes"
+    chk html-doctype "$(head -1 "$rep")" "<!DOCTYPE html>"
+    chk html-no-external     "$(grep -c -i -E 'http://|https://|<script|<img|<link|@import' "$rep")" "0"
+    chk html-inline-style    "$(grep -c '<style>' "$rep")" "1"
+    chk html-has-provenance  "$(grep -c '<h2>provenance</h2>' "$rep")" "1"
+    chk html-has-protocol    "$(grep -c '<h2>protocol</h2>' "$rep")" "1"
+    chk html-store           "$(awk -F'\t' '$2=="html"' "$PCAP_DIR/exports.tsv" | wc -l | tr -d ' ')" "1"
+    # The writer proves its own two properties (escaping, no external ref).
+    chk html-writer-selftest \
+        "$(python3 "$IMSISTING_ROOT/tools/html-report.py" --selftest 2>/dev/null | tail -1)" "RESULT	PASS"
+    chk html-writer-present "$([[ -f "$IMSISTING_ROOT/tools/html-report.py" ]] && echo yes || echo no)" "yes"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1462,6 +1521,8 @@ pcap_menu() {
   [7]  show the harvested identity store
   [8]  build a synthetic sample capture
   [9]  clear the identity store
+  [x]  protocol-specific export (sip|diameter|dns|gtp)
+  [h]  self-contained HTML report
   [0]  back
 
 M
@@ -1493,6 +1554,15 @@ M
                pcap_build_sample "$p"
                read -rp "  press enter " _ ;;
             9) pcap_cmd_clear; sleep 1 ;;
+            x) read -rp "  proto (sip|diameter|dns|gtp)> " y
+               read -rp "  pcap path> " p
+               read -rp "  out.tsv (blank = stdout)> " o
+               pcap_cmd_export "$y" "$p" "$o"
+               read -rp "  press enter " _ ;;
+            h) read -rp "  pcap path> " p
+               read -rp "  out.html (blank = loot)> " o
+               pcap_cmd_html "$p" "$o"
+               read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1530,6 +1600,188 @@ pcap_cmd_node_fetch() {  # <name> <path>
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── --export: one protocol's fields, and only the ones tshark can name ──
+# A protocol-specific export is a field list, not a decoder: the dissector
+# belongs to tshark (4.2.2 here), and this module refuses to re-implement
+# SIP, Diameter or GTP parsing by hand and then call the result confirmed.
+#
+# The field names below are tshark's own display names, so `tshark -G fields`
+# confirms each one on this host. stdout is pure TSV (header + rows, so awk
+# and pandas read it directly); the provenance, the counts and every field
+# that came back empty for the whole capture are reported on stderr, with an
+# `unobserved` row per empty field -- an absent column is not an absent value.
+pcap_export_spec() {
+    # Fills PCAP_EX_FILTER and PCAP_EX_FIELDS for a protocol, or returns 1.
+    case "$1" in
+        sip) PCAP_EX_FILTER='sip'
+             PCAP_EX_FIELDS='frame.number frame.time_epoch ip.src ip.dst sip.Method sip.Status-Code sip.CSeq.method sip.Call-ID sip.From sip.To sip.User-Agent' ;;
+        diameter) PCAP_EX_FILTER='diameter'
+             PCAP_EX_FIELDS='frame.number frame.time_epoch ip.src ip.dst diameter.cmd.code diameter.applicationId diameter.Session-Id diameter.Result-Code diameter.Origin-Host diameter.Destination-Host diameter.Origin-Realm diameter.Destination-Realm' ;;
+        dns) PCAP_EX_FILTER='dns'
+             PCAP_EX_FIELDS='frame.number frame.time_epoch ip.src ip.dst dns.flags.response dns.qry.name dns.a dns.aaaa dns.cname' ;;
+        gtp) PCAP_EX_FILTER='gtp'
+             PCAP_EX_FIELDS='frame.number frame.time_epoch ip.src ip.dst gtp.message gtp.teid ip.proto' ;;
+        *)   return 1 ;;
+    esac
+    return 0
+}
+
+pcap_export_protos() { printf 'sip diameter dns gtp'; }
+
+pcap_cmd_export() {
+    # Usage: --export <proto> <pcap> [out.tsv]
+    local proto="${1:-}" f="${2:-}" out="${3:-}"
+    [[ -n "$proto" ]] || {
+        printf 'ERROR\tusage: --export <sip|diameter|dns|gtp> <pcap> [out.tsv]\n' >&2
+        return 2; }
+    pcap_export_spec "$proto" || {
+        printf 'ERROR\texport refuses proto "%s": this module exports %s and nothing else\n' \
+            "$(pcap_sanitize "$proto")" "$(pcap_export_protos)" >&2
+        return 2; }
+    [[ -n "$f" ]] || { printf 'ERROR\tusage: --export %s <pcap> [out.tsv]\n' "$proto" >&2; return 2; }
+    pcap_check_file "$f" || return $?
+
+    if ! command -v tshark >/dev/null 2>&1; then
+        printf 'export\t%s\tunobserved\tno tshark on PATH: %s fields are its dissector, and this module will not guess them\n' \
+            "$proto" "$proto" >&2
+        printf 'unobserved\t%s\tfields\tno tshark: nothing was read out of %s for this protocol\n' \
+            "$proto" "$(pcap_sanitize "$f")" >&2
+        printf 'handoff\tinstall tshark (4.2.2 dissects SIP, Diameter, DNS and GTP) or use --extract for the raw layer\n' >&2
+        return 3
+    fi
+
+    local tmp="$MOD_TMP/export.$$.tsv" rc nrows nfields e known fld
+    mkdir -p "$MOD_TMP" 2>/dev/null
+
+    # Field names drift between tshark releases. Ask tshark which of these it
+    # actually knows (tshark -G fields) instead of assuming: a name it does
+    # not know is dropped from the export and reported as unobserved, so a
+    # renamed field can never masquerade as a column of empty values.
+    known=$(tshark -G fields 2>/dev/null | awk -F'\t' '{print $3}')
+    local -a ok_fields=()
+    for fld in $PCAP_EX_FIELDS; do
+        if grep -qx -- "$fld" <<<"$known"; then
+            ok_fields+=("$fld")
+        else
+            printf 'unobserved\t%s\t%s\tnot a field this tshark knows (tshark -G fields): the column is absent, not empty\n' \
+                "$proto" "$fld" >&2
+        fi
+    done
+    if [[ ${#ok_fields[@]} -eq 0 ]]; then
+        printf 'handoff\t%s\tnone of the declared fields exists in this tshark; nothing was exported\n' "$proto" >&2
+        return 3
+    fi
+    PCAP_EX_FIELDS="${ok_fields[*]}"
+    # -e takes ONE field name, so repeat it: a space-joined list makes tshark
+    # read the tail as a second display filter and refuse the run.
+    local -a eargs=()
+    for fld in "${ok_fields[@]}"; do eargs+=(-e "$fld"); done
+    tshark -r "$f" -Y "$PCAP_EX_FILTER" -T fields "${eargs[@]}" \
+        -E separator=/t -E occurrence=f > "$tmp" 2>/dev/null
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        rm -f "$tmp"
+        printf 'ERROR\ttshark refused %s (exit %d) -- not a capture it can read\n' \
+            "$(pcap_sanitize "$f")" "$rc" >&2
+        return 1
+    fi
+    nrows=$(grep -c . "$tmp" 2>/dev/null || echo 0)
+    nfields=$(wc -w <<<"$PCAP_EX_FIELDS" | tr -d ' ')
+
+    if [[ $nrows -eq 0 ]]; then
+        printf 'export\t%s\t0 rows\tunobserved: the display filter "%s" matched no frame in this capture\n' \
+            "$proto" "$PCAP_EX_FILTER" >&2
+        rm -f "$tmp"
+        [[ -n "$out" ]] && : >"$out"
+        return 0
+    fi
+
+    # A field empty in every row is unobserved for this capture, and says so.
+    local col
+    for (( col = 1; col <= nfields; col++ )); do
+        e=$(awk -F'\t' -v c="$col" '$c!=""{n++} END{print n+0}' "$tmp")
+        if [[ "$e" -eq 0 ]]; then
+            printf 'unobserved\t%s\t%s\tthis dissector returned no value for the field in any of the %s frames\n' \
+                "$proto" "$(cut -d' ' -f"$col" <<<"$PCAP_EX_FIELDS")" "$nrows" >&2
+        fi
+    done
+
+    if [[ -n "$out" ]]; then
+        { tr ' ' '\t' <<<"$PCAP_EX_FIELDS"; cat "$tmp"; } > "$out" || {
+            rm -f "$tmp"
+            printf 'ERROR\tcannot write %s\n' "$(pcap_sanitize "$out")" >&2
+            return 1; }
+        printf 'export\t%s\t%s\t%d rows\t%d columns\n' \
+            "$proto" "$(pcap_sanitize "$out")" "$nrows" "$nfields" >&2
+        printf 'measured\t%s\twritten\t%s\n' "$proto" "$(pcap_sanitize "$out")" >&2
+    else
+        tr ' ' '\t' <<<"$PCAP_EX_FIELDS"
+        cat "$tmp"
+        printf 'export\t%s\tstdout\t%d rows\t%d columns\n' "$proto" "$nrows" "$nfields" >&2
+    fi
+    rm -f "$tmp"
+
+    mkdir -p "$PCAP_DIR" 2>/dev/null
+    printf '%s\texport\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$proto" "$(pcap_sanitize "$f")" "$nrows" \
+        >> "$PCAP_DIR/exports.tsv" 2>/dev/null || true
+    return 0
+}
+
+# ── --html: the same rows, as one file that cannot fetch anything ───────
+# The report is written by tools/html-report.py, whose stylesheet is inline
+# and which refuses to emit a script, a link, an image or a URL. Everything
+# in it came from this module's own verbs over this one capture, so the
+# report says what was measured and nothing more; a metric the parser did not
+# produce is absent, not zero.
+pcap_cmd_html() {
+    # Usage: --html <pcap> [out.html]
+    local f="${1:-}" out="${2:-}"
+    [[ -n "$f" ]] || { printf 'ERROR\tusage: --html <pcap> [out.html]\n' >&2; return 2; }
+    pcap_check_file "$f" || return $?
+    local writer="$IMSISTING_ROOT/tools/html-report.py"
+    if [[ ! -f "$writer" ]]; then
+        printf 'ERROR\tunobserved: the report writer is missing at %s\n' "$writer" >&2
+        return 1
+    fi
+    mkdir -p "$PCAP_DIR" 2>/dev/null
+    out="${out:-$PCAP_DIR/report_$(date -u +%Y%m%dT%H%M%SZ).html}"
+
+    local gen; gen=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local tsh; tsh=$(command -v tshark 2>/dev/null || echo none)
+    {
+        printf 'provenance\tcapture\t%s\targument\n' "$(pcap_sanitize "$f")"
+        printf 'provenance\tbytes\t%s\tstat\n' "$(wc -c < "$f" | tr -d ' ')"
+        printf 'provenance\tcontainer\t%s\tmodule 17 header sniff\n' "$(pcap_magic_check "$f")"
+        printf 'provenance\ttshark\t%s\toptional dissector\n' "$tsh"
+        printf 'provenance\tparser\tfallback python3\tno third-party import\n'
+        pcap_run summary "$f" 2>/dev/null | awk -F'\t' '
+            { ev = ""; for (i = 4; i <= NF; i++) ev = ev (i > 4 ? " " : "") $i;
+              printf "%s\t%s\t%s\t%s\n", $1, $2, $3, ev }'
+        pcap_run hierarchy "$f" 2>/dev/null | awk -F'\t' '
+            { ev = ""; for (i = 4; i <= NF; i++) ev = ev (i > 4 ? " " : "") $i;
+              printf "protocol\t%s\t%s frames\t%s\n", $2, $3, ev }'
+        pcap_run conversations "$f" 2>/dev/null | awk -F'\t' '
+            { printf "conversation\t%s %s->%s\t%s frames\tbytes=%s span=%ss\n", $2, $3, $4, $5, $6, $8 }'
+        pcap_run identities "$f" 2>/dev/null | awk -F'\t' '
+            $1 == "identity" { printf "identity\t%s\t%s\tframe %s %s %s->%s %s\n", $3, $4, $2, $5, $6, $7, $8 }'
+        printf 'doctrine\tunobserved\tunobserved\ta metric this parser did not produce is absent from this report, never reported as zero\n'
+    } | python3 "$writer" --title "Capture analysis - $(basename "$f")" \
+            --source "$(pcap_sanitize "$f")" --generated "$gen" --out "$out"
+
+    local rc=$?
+    if [[ $rc -ne 0 || ! -s "$out" ]]; then
+        printf 'ERROR\tthe report writer failed (exit %d); nothing was written to %s\n' \
+            "$rc" "$(pcap_sanitize "$out")" >&2
+        return 1
+    fi
+    printf 'report\t%s\t%d bytes\tself-contained: no script, no link, no external asset\n' \
+        "$(pcap_sanitize "$out")" "$(wc -c < "$out" | tr -d ' ')"
+    printf '%s\thtml\t%s\t%s\n' "$gen" "$(pcap_sanitize "$f")" "$(pcap_sanitize "$out")" \
+        >> "$PCAP_DIR/exports.tsv" 2>/dev/null || true
+    return 0
+}
+
 pcap_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -1540,6 +1792,8 @@ pcap_cli_main() {
         --hierarchy)     pcap_cmd_hierarchy "${1:-}" ;;
         --conversations) pcap_cmd_conversations "${1:-}" ;;
         --extract)       pcap_cmd_extract "${1:-}" "${2:-}" "${3:-}" ;;
+        --export)        pcap_cmd_export "${1:-}" "${2:-}" "${3:-}" ;;
+        --html)          pcap_cmd_html "${1:-}" "${2:-}" ;;
         --identities)    pcap_cmd_identities "${1:-}" ;;
         --ident-list)    pcap_cmd_ident_list ;;
         --build-sample)  pcap_build_sample "${1:-}" ;;
@@ -1565,6 +1819,15 @@ Usage: $0 COMMAND
   --extract <pcap> <frame> <layer>
                                 a layer's hex, for another decoder
   --identities <pcap>           harvest IMSI/IMEI/TMSI into loot and report
+  --export <proto> <pcap> [out.tsv]
+                                one protocol's fields as pure TSV (stdout or
+                                out.tsv); proto is sip, diameter, dns or gtp,
+                                and the dissector is tshark's, not this
+                                module's -- an empty field is reported as
+                                unobserved on stderr, never as a blank value
+  --html <pcap> [out.html]      self-contained HTML report (inline style, no
+                                script, no external asset) built only from
+                                this module's own rows over that capture
   --ident-list                  the harvested identity store, deduplicated
   --build-sample <out.pcap>     write a small synthetic capture
   --node <name>                 list the captures that fleet node holds

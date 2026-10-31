@@ -65,6 +65,7 @@ tgeo_status_tsv() {
     printf 'CONSTANT\tc=299792458 m/s (exact)\n'
     printf 'TRANSMIT\tnone — arithmetic on TA measurements\n'
     printf 'SELFTEST\tyes\n'
+    printf 'MULTIPOINT\t--multi-point <observations.tsv>  (grid multilateration, needs three ranges)\n'
 }
 
 # ── TA to range ─────────────────────────────────────────────────────────
@@ -224,6 +225,192 @@ tgeo_umts_anchors() {   # <tsv>
     printf 'verdict\tumts_anchors_extracted\n'
 }
 
+# ── --multi-point: several ranges, one position, and an honest radius ───
+# One TA observation is a ring, not a point: it constrains a distance and
+# leaves the bearing free, so no number of repeats of ONE cell fixes a
+# position. Three or more ranges from cells at known positions over-determine
+# it, which is why this refuses below three instead of printing a ring centre
+# and calling it a fix.
+#
+# The estimator is a two-level grid search scored on squared range residuals:
+# deterministic, dependency-free, and deliberately small (no scipy here). The
+# uncertainty radius is the extent of the region whose cost is within the
+# measurements' own quantisation error of the best point -- the same +-39.04 m
+# one-way bound -- and never smaller than the fine grid step, so a radius is a
+# statement about the geometry, not a decoration.
+#
+# What is NOT used, and why: RSRP. Received power is not a distance. Turning
+# dBm into metres needs a path-loss model calibrated for that cell's antenna
+# height, tilt, clutter and EIRP, and no such model exists on this machine.
+# TS 36.214 5.1.1 defines RSRP as a power measurement; nothing in it is a
+# range. An RSRP column is therefore counted and declared unobserved.
+#
+# The local frame is spherical, R = 6371008.8 m (IUGG mean radius), as local
+# east/north metres about the mean of the cell positions: over a cell-sized
+# area the distortion against the ellipsoid is under 0.5%. A fix computed here
+# is not a surveyed coordinate and the radius says so.
+tgeo_multi_point() {   # <observations.tsv>
+    local file="${1:-}"
+    if [[ -z "$file" ]]; then
+        printf 'ERROR\tusage: --multi-point <observations.tsv>\n' >&2
+        return 2
+    fi
+    if [[ ! -r "$file" ]]; then
+        printf 'ERROR\tcannot read %s\n' "$(tgeo_sanitize "$file")" >&2
+        printf 'WHY\tno observation file; nothing is estimated from a file that is not there\n' >&2
+        return 1
+    fi
+
+    local tmp rows=0 used=0 rsrp=0 skipped=0
+    tmp=$(mktemp "$MOD_TMP/mp.XXXXXX") || {
+        printf 'ERROR\tmktemp failed under %s\n' "$(tgeo_sanitize "$MOD_TMP")" >&2; return 1; }
+    local line
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        tgeo_split "$line"
+        [[ "${TGEO_F[0]:-}" == cell_id ]] && continue
+        local cid="${TGEO_F[0]:-}" lat="${TGEO_F[1]:-}" lon="${TGEO_F[2]:-}"
+        local ta="${TGEO_F[3]:-}" rat="${TGEO_F[4]:-lte}" mu="${TGEO_F[5]:-0}"
+        local rs="${TGEO_F[6]:-}"
+        rows=$((rows + 1))
+        [[ -n "$rs" ]] && rsrp=$((rsrp + 1))
+        # A row with no TA is a cell list, not a range measurement: keep it
+        # visible as skipped rather than letting it silently become a zero.
+        [[ "$ta" =~ ^[0-9]+$ ]] || { skipped=$((skipped + 1)); continue; }
+        [[ "$lat" =~ ^-?[0-9.]+$ && "$lon" =~ ^-?[0-9.]+$ ]] || {
+            skipped=$((skipped + 1)); continue; }
+        local dist rp re
+        dist=$(tgeo_ta_distance "$ta" "$rat" "$mu") || { skipped=$((skipped + 1)); continue; }
+        rp=$(printf '%s\n' "$dist" | awk -F'\t' '$1=="total_m"{print $2}')
+        re=$(printf '%s\n' "$dist" | awk -F'\t' '$1=="error_bound_m"{print $2}')
+        printf '%s\t%s\t%s\t%s\t%s\n' "$lat" "$lon" "$rp" "$re" "$(tgeo_sanitize "$cid")" >> "$tmp"
+        used=$((used + 1))
+    done < "$file"
+
+    if (( used < 3 )); then
+        printf 'ERROR\tonly %s range observation(s) usable\n' "$used" >&2
+        printf 'WHY\tone cell gives a ring and two give at best two rings; a position needs three or more ranges from cells at known positions. Rows seen: %s, skipped: %s\n' "$rows" "$skipped" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+
+    local out; out=$(awk -F'\t' '
+        BEGIN { pi = atan2(0,-1); Rn = 6371008.8 }
+        {
+            n++; lat[n] = $1 + 0; lon[n] = $2 + 0; r[n] = $3 + 0; e[n] = $4 + 0; cid[n] = $5
+            lat0s += $1 + 0; lon0s += $2 + 0; errmass += ($4 + 0) * ($4 + 0)
+        }
+        END {
+            if (n < 3) { printf "status\trefused\nreason\tfewer than three ranges\n"; exit 1 }
+            lat0 = lat0s / n; lon0 = lon0s / n
+            cosl = cos(lat0 * pi / 180)
+            for (i = 1; i <= n; i++) {
+                x[i] = Rn * (lon[i] - lon0) * pi / 180 * cosl
+                y[i] = Rn * (lat[i] - lat0) * pi / 180
+            }
+            xmin = x[1] - r[1]; xmax = x[1] + r[1]
+            ymin = y[1] - r[1]; ymax = y[1] + r[1]
+            for (i = 2; i <= n; i++) {
+                if (x[i] - r[i] < xmin) xmin = x[i] - r[i]
+                if (x[i] + r[i] > xmax) xmax = x[i] + r[i]
+                if (y[i] - r[i] < ymin) ymin = y[i] - r[i]
+                if (y[i] + r[i] > ymax) ymax = y[i] + r[i]
+            }
+            span = xmax - xmin; if (ymax - ymin > span) span = ymax - ymin
+            if (span <= 0) span = 1
+            N = 160
+            step = span / N; if (step < 1) step = 1
+            bestc = -1
+            for (i = 0; i <= N; i++) {
+                px = xmin + i * step
+                for (j = 0; j <= N; j++) {
+                    py = ymin + j * step
+                    c = 0
+                    for (k = 1; k <= n; k++) { d = sqrt((px - x[k])^2 + (py - y[k])^2) - r[k]; c += d * d }
+                    if (bestc < 0 || c < bestc) { bestc = c; bx = px; by = py }
+                }
+            }
+            # second level: 1/20 of the coarse step around the best coarse cell
+            fstep = step / 20; if (fstep < 0.1) fstep = 0.1
+            for (i = -20; i <= 20; i++) {
+                px = bx + i * fstep
+                for (j = -20; j <= 20; j++) {
+                    py = by + j * fstep
+                    c = 0
+                    for (k = 1; k <= n; k++) { d = sqrt((px - x[k])^2 + (py - y[k])^2) - r[k]; c += d * d }
+                    if (c < bestc) { bestc = c; fx = px; fy = py }
+                }
+            }
+            if (fx == "") { fx = bx; fy = by }
+            # honest radius: every grid point whose cost is inside the
+            # measurements own error, measured from the estimate.
+            thresh = bestc + errmass
+            rad = 0
+            for (i = 0; i <= N; i++) {
+                px = xmin + i * step
+                for (j = 0; j <= N; j++) {
+                    py = ymin + j * step
+                    c = 0
+                    for (k = 1; k <= n; k++) { d = sqrt((px - x[k])^2 + (py - y[k])^2) - r[k]; c += d * d }
+                    if (c <= thresh) { dd = sqrt((px - fx)^2 + (py - fy)^2); if (dd > rad) rad = dd }
+                }
+            }
+            if (rad < fstep) rad = fstep
+            printf "status\tok\n"
+            printf "estimator\ttwo-level grid search on squared range residuals (dependency-free)\n"
+            printf "frame\tlocal east/north metres, spherical R=6371008.8 m (IUGG mean)\n"
+            printf "origin_lat\t%.6f\n", lat0
+            printf "origin_lon\t%.6f\n", lon0
+            printf "observations\t%d\n", n
+            printf "range_uncertainty_m\t%.2f\n", sqrt(errmass)
+            printf "x_m\t%.2f\ny_m\t%.2f\n", fx, fy
+            printf "estimate_lat\t%.6f\n", lat0 + (fy / Rn) * 180 / pi
+            printf "estimate_lon\t%.6f\n", lon0 + (fx / (Rn * cosl)) * 180 / pi
+            printf "best_cost_m2\t%.3f\n", bestc
+            printf "rms_residual_m\t%.3f\n", sqrt(bestc / n)
+            printf "uncertainty_radius_m\t%.0f\n", (rad == int(rad)) ? rad : int(rad) + 1
+            printf "uncertainty_basis\tgrid points whose cost is within cost_min + sum(error_bound^2); never below the fine step %.2f m\n", fstep
+            printf "ref\tTS 36.211 4.1 and TS 38.211 4.1 give the TA unit; TS 36.214 5.1.1 defines RSRP as a power\n"
+            printf "limit\tTA quantisation bounds each range to +-39.04 m one-way; a poor geometry (two cells nearly opposite) leaves the radius large and this module reports the large radius rather than a small one\n"
+            printf "verdict\tmultilaterated_from_%d_ranges\n", n
+        }' "$tmp" 2>&1)
+    local rc=$?
+    rm -f "$tmp"
+    printf '%s\n' "$out"
+    if (( rc != 0 )); then
+        printf 'WHY\tthe grid search refused: fewer than three ranges reached it\n' >&2
+        return 1
+    fi
+
+    printf 'sources\t%s\n' "$used"
+    printf 'skipped_rows\t%s\n' "$skipped"
+    if (( rsrp > 0 )); then
+        printf 'rsrp_rows\t%s\trange\tunobserved\treason\tRSRP is a received power (TS 36.214 5.1.1); no path-loss model is on this machine, so it weights nothing here\n' "$rsrp"
+    else
+        printf 'rsrp_rows\t0\trange\tunobserved\treason\tno RSRP column in the input; RSRP would not have been a range either\n'
+    fi
+
+    # Append-only store: one row per fix, header first.
+    local store ts elat elon rad rmse
+    store="$TGEO_DIR/multi_point.tsv"
+    mkdir -p "$TGEO_DIR" 2>/dev/null
+    if [[ ! -f "$store" ]]; then
+        printf 'ts\tinput\tobservations\test_lat\test_lon\tx_m\ty_m\tuncertainty_radius_m\trms_residual_m\n' > "$store"
+    fi
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    elat=$(printf '%s\n' "$out" | awk -F'\t' '$1=="estimate_lat"{print $2}')
+    elon=$(printf '%s\n' "$out" | awk -F'\t' '$1=="estimate_lon"{print $2}')
+    rad=$(printf '%s\n' "$out" | awk -F'\t' '$1=="uncertainty_radius_m"{print $2}')
+    rmse=$(printf '%s\n' "$out" | awk -F'\t' '$1=="rms_residual_m"{print $2}')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$ts" "$(tgeo_sanitize "$file")" "$used" "$elat" "$elon" \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="x_m"{print $2}')" \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="y_m"{print $2}')" \
+        "${rad:--}" "${rmse:--}" >> "$store"
+    printf 'store\t%s\n' "$store"
+    return 0
+}
+
 tgeo_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -324,6 +511,30 @@ A
     chk umts-fix-rmse    "$(printf '%s\n' "$fix" | awk -F'\t' '$1=="residual_rmse"{print ($2 < 1) ? "small" : "large"}')" "small"
     rm -rf "$d"
 
+    # 4. --multi-point: three equal rings about three cells put the fix on the
+    #    circumcentre (48.8600, 2.3600 by construction); RSRP is counted and
+    #    refused as a range; two rows are a refusal, not a small answer.
+    local mpd mp mp2
+    mpd=$(mktemp -d "$MOD_TMP/mp.XXXXXX") || { printf 'ERROR\tmktemp failed\n' >&2; return 1; }
+    printf 'cell_id\tlat\tlon\tta\trat\tmu\trsrp_dbm\nc1\t48.8500\t2.3500\t17\tlte\t0\t-85\nc2\t48.8500\t2.3700\t17\tlte\t0\t-91\nc3\t48.8700\t2.3500\t17\tlte\t0\t-88\n' > "$mpd/obs.tsv"
+    mp=$(tgeo_multi_point "$mpd/obs.tsv" 2>/dev/null)
+    chk mp-status  "$(fld "$mp" status)" "ok"
+    chk mp-obs     "$(fld "$mp" observations)" "3"
+    chk mp-verdict "$(fld "$mp" verdict)" "multilaterated_from_3_ranges"
+    chk mp-lat     "$(printf '%s\n' "$mp" | awk -F'\t' '$1=="estimate_lat"{d=($2+0)-48.8600; print (d<0.0005 && d>-0.0005) ? "near" : "far"}')" "near"
+    chk mp-lon     "$(printf '%s\n' "$mp" | awk -F'\t' '$1=="estimate_lon"{d=($2+0)-2.3600; print (d<0.0005 && d>-0.0005) ? "near" : "far"}')" "near"
+    chk mp-radius  "$(printf '%s\n' "$mp" | awk -F'\t' '$1=="uncertainty_radius_m"{print ($2+0>0) ? "positive" : "zero"}')" "positive"
+    chk mp-rsrp    "$(printf '%s\n' "$mp" | awk -F'\t' '$1=="rsrp_rows"{print $3"|"$4}')" "range|unobserved"
+    chk mp-ref     "$(printf '%s\n' "$mp" | awk -F'\t' '$1=="ref"{print ($2 ~ /TS 36.211/) ? "cited" : "none"}')" "cited"
+    chk mp-store   "$(awk -F'\t' 'NR>1' "$TGEO_DIR/multi_point.tsv" 2>/dev/null | grep -c . || true)" "1"
+    chk mp-store-hdr "$(head -1 "$TGEO_DIR/multi_point.tsv" 2>/dev/null | cut -f1)" "ts"
+    printf 'cell_id\tlat\tlon\tta\nc1\t48.8500\t2.3500\t17\nc2\t48.8500\t2.3700\t17\n' > "$mpd/two.tsv"
+    chk mp-two     "$(tgeo_multi_point "$mpd/two.tsv" >/dev/null 2>&1; echo $?)" "1"
+    chk mp-two-why "$(tgeo_multi_point "$mpd/two.tsv" 2>&1 >/dev/null | grep -c 'need\|needs three' || true)" "1"
+    chk mp-missing "$(tgeo_multi_point "$mpd/none.tsv" >/dev/null 2>&1; echo $?)" "1"
+    chk mp-noargs  "$(tgeo_multi_point >/dev/null 2>&1; echo $?)" "2"
+    rm -rf "$mpd"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -337,7 +548,8 @@ tgeo_menu() {
   [1]  TA to range
   [2]  Trilaterate from anchors
   [3]  Parse a cell list
-  [4]  Plan (handoff)
+  [4]  Multi-point fix from several cells
+  [5]  Plan (handoff)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -346,7 +558,8 @@ M
                tgeo_ta_distance "$u" "${r:-lte}" "${m:-0}"; read -rp "  enter " _ ;;
             2) read -rp "  anchor tsv> " p; tgeo_trilaterate "$p"; read -rp "  enter " _ ;;
             3) read -rp "  cell tsv> " p; tgeo_parse_cells "$p"; read -rp "  enter " _ ;;
-            4) tgeo_plan; read -rp "  enter " _ ;;
+            4) read -rp "  observations tsv> " p; tgeo_multi_point "$p"; read -rp "  enter " _ ;;
+            5) tgeo_plan; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -363,6 +576,7 @@ tgeo_cli_main() {
         --umts-anchors) tgeo_umts_anchors "$@" ;;
         --trilaterate) tgeo_trilaterate "${1:-}" ;;
         --cells)       tgeo_parse_cells "${1:-}" ;;
+        --multi-point) tgeo_multi_point "$@" ;;
         --plan)        tgeo_plan ;;
         --selftest)    tgeo_selftest ;;
         --menu)        tgeo_menu ;;
@@ -375,6 +589,10 @@ Usage: $0 COMMAND
   --ta <units> [lte|nr] [mu]   TA to one-way range and error bound
   --trilaterate <tsv>      least-squares fix from x/y/range anchors
   --cells <tsv>            ranges for a cell list (cell lat lon ta rat [mu])
+  --multi-point <tsv>      fix from three or more TA/RSRP rows for one target
+                           (cell_id lat lon ta rat mu [rsrp_dbm]); prints the
+                           estimate, an uncertainty radius and what RSRP could
+                           not contribute. Refuses below three ranges.
   --plan                   measurement handoff plan
   --selftest               verify the maths against known geometry
   --menu                   interactive menu

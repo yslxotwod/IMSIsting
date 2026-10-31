@@ -28026,6 +28026,10 @@ static ModuleSubmenuEntry sim_entries[] = {
     { "Card authentication", "security-high-symbolic", NULL, sim_build_auth },
     { "Keys and AKA", "auth-smartcard-symbolic", NULL, sim_build_aka },
     { "eSIM provisioning", "auth-smartcard-symbolic", NULL, sim_build_esim },
+    { "Secure channel",
+      "security-high-symbolic",
+      "#GLOBALPLATFORM|~--scp03-audit",
+      NULL }
 };
 /* 17_pcap_analysis — capture analysis.
  *
@@ -28227,6 +28231,10 @@ static ModuleSubmenuEntry pcap_entries[] = {
        command line rather than being guessed at by a button. */
     { "From a node", "network-server-symbolic",
       "#LIST THEM|~--node#FETCH ONE|~--node-fetch", NULL },
+    { "Report",
+      "document-save-symbolic",
+      "#EXPORT ONE PROTOCOL|~--export|#WHOLE CAPTURE|~--html",
+      NULL }
 };
 /* 18_imsi_exposure — who has been asking.
  *
@@ -28632,6 +28640,10 @@ static ModuleSubmenuEntry caud_entries[] = {
     { "Build message", "dialog-information-symbolic", NULL, caud_build_messages },
     { "Sessions", "channel-secure-symbolic", NULL, caud_build_sessions },
     { "Findings", "system-search-symbolic", NULL, caud_build_findings },
+    { "Report",
+      "document-save-symbolic",
+      "#EXPORT SESSIONS|~--export|#WHOLE AUDIT|~--html",
+      NULL }
 };
 /* ── The CVE catalogue ───────────────────────────────────────────────────────
 
@@ -29400,6 +29412,10 @@ static ModuleSubmenuEntry gcve_entries[] = {
     { "FLAWS IN CARD UPDATES", "imsisting-41_ota_sms-symbolic", NULL, gcve_view_sim_ota },
     { "SIM Toolkit", "imsisting-52_stk-symbolic", NULL, gcve_view_sim_toolkit },
     { "FLAWS IN SS7 AND MAP", "imsisting-26_ss7_map-symbolic", NULL, gcve_view_ss7_map },
+    { "Advisories",
+      "dialog-warning-symbolic",
+      "#SEARCH THE TABLE|~--cve-search",
+      NULL }
 };
 /* ── the RANSacked corpus ─────────────────────────────────────────────
    A second catalogue, and a different one from the module's own: the entries
@@ -29695,6 +29711,10 @@ static ModuleSubmenuEntry lcve_entries[] = {
     { "Page a handset", "imsisting-28_paging_track-symbolic", NULL, lcve_view_paging },
     { "FLAWS IN SYSTEM INFORMATION", "imsisting-10_lte_air-symbolic", NULL, lcve_view_sib },
     { "VoLTE", "imsisting-30_volte_ims-symbolic", NULL, lcve_view_volte },
+    { "Advisories",
+      "dialog-warning-symbolic",
+      "#SEARCH THE TABLE|~--cve-search",
+      NULL }
 };
 CVE_OVERVIEW_VIEW(ncve_view_overview, "FLAWS RECORDED AGAINST 5G",
     "Every catalogued 5G vulnerability, one card per vector, filed by the part "
@@ -29740,6 +29760,10 @@ static ModuleSubmenuEntry ncve_entries[] = {
     { "Slicing", "imsisting-34_slicing-symbolic", NULL, ncve_view_slicing },
     { "SUCI Privacy", "imsisting-14_suci-symbolic", NULL, ncve_view_suci_privacy },
     { "FLAWS IN THE USER PLANE", "imsisting-23_traffic_analysis-symbolic", NULL, ncve_view_upf_pfcp },
+    { "Advisories",
+      "dialog-warning-symbolic",
+      "#SEARCH THE TABLE|~--cve-search",
+      NULL }
 };
 /* 25_killchain — Cellular Killchain.
  *
@@ -30050,6 +30074,10 @@ tana_build_store(AppState *state, const char *module_id,
 static ModuleSubmenuEntry tana_entries[] = {
     { "Flows", "dialog-information-symbolic", NULL, tana_build_flows },
     { "Store", "preferences-system-symbolic", NULL, tana_build_store },
+    { "Flow classification",
+      "view-list-symbolic",
+      "#SCORE THE FLOWS|~--ml-classify|#LEAVE THE MACHINE|~--export|~--html",
+      NULL }
 };
 /* 24_rf_fingerprint — the transmitter, not the message.
  *
@@ -33836,6 +33864,10 @@ static ModuleSubmenuEntry bbnd_entries[] = {
     { "Encoding", "document-open-symbolic", NULL, bbnd_build_encoding },
     { "Modem path", "network-transmit-receive-symbolic", NULL, bbnd_build_modem },
     { "Over the Air", "imsisting-01_radio-symbolic", NULL, bbnd_build_air },
+    { "Firmware",
+      "drive-harddisk-symbolic",
+      "#IDENTIFY AN IMAGE|~--firmware-analyze",
+      NULL }
 };
 /* 36_vowifi — voice over Wi-Fi, which is IKEv2 into an ePDG.
  *
@@ -34916,6 +34948,10 @@ tgeo_build_place(AppState *state, const char *module_id,
 static ModuleSubmenuEntry tgeo_entries[] = {
     { "Timing advance", "dialog-information-symbolic", NULL, tgeo_build_ta },
     { "Position", "system-search-symbolic", NULL, tgeo_build_place },
+    { "Multi-point fix",
+      "find-location-symbolic",
+      "#COMBINE OBSERVATIONS|~--multi-point",
+      NULL }
 };
 /* 40_sba_pivot — the service-based interface of a 5G core.
  *
@@ -37646,6 +37682,10 @@ static ModuleSubmenuEntry capi_entries[] = {
     { "Controls", "security-high-symbolic", NULL, capi_build_attacks },
     { "Run comparison", "system-search-symbolic", NULL, capi_build_compare },
     { "Enumeration", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
+    { "TR-069 / TR-369",
+      "network-server-symbolic",
+      "#CWMP|~--cwmp|#USP|~--usp",
+      NULL }
 };
 /* 61_gnss — the receiver interface.
  *
@@ -38630,6 +38670,10 @@ static ModuleSubmenuEntry lpp_entries[] = {
     { "Procedures", "system-search-symbolic", NULL, lpp_build_procedures },
     { "Positioning", "network-transmit-receive-symbolic", NULL, lpp_build_supl },
     { "Location service", "find-location-symbolic", NULL, lpp_build_lcs },
+    { "OTDOA",
+      "find-location-symbolic",
+      "#PRS OCCASIONS|--otdoa-plan|#ASSISTANCE DATA|~--otdoa-forge",
+      NULL }
 };
 /* 47_wifioff — VoWiFi / ePDG Attacks.
  *
@@ -41846,6 +41890,10 @@ static ModuleSubmenuEntry suci_catcher_entries[] = {
       suci_catcher_build_codecs },
     { "Trace", "document-open-symbolic", NULL, suci_catcher_build_trace },
     { "Catch feed", "media-record-symbolic", NULL, suci_catcher_build_live },
+    { "IMS registration",
+      "network-server-symbolic",
+      "#BUILD OR READ|~--ims-catch",
+      NULL }
 };
 
 

@@ -96,6 +96,7 @@ bbnd_status_tsv() {
     printf 'RF_SUBMIT\tready (--rf-submit writes a SCPI file: SMW200A complete rc 0, N5182B upload-only rc 3; nothing is sent)\n'
     printf 'GATE\tnone -- the offensive verbs run without a flag\n'
     printf 'SELFTEST\tyes\n'
+    printf 'FIRMWARE\t--firmware-analyze <file>  (container + advertised strings)\n'
 }
 
 # ── BER/DER definite-length codec (X.690 §8.1.3) ────────────────────────
@@ -985,6 +986,193 @@ bbnd_rf_submit() {
     return 3
 }
 
+# ── --firmware-analyze: what a flash image says about itself ────────────
+# A baseband image is a bag of containers. The cheapest honest read is the
+# magic at offset 0 plus the strings the image carries, and each of those gets
+# the doctrine label it deserves:
+#
+#   measured    the octets on disk: the magic, the superblock bytes, the size,
+#               the digest
+#   advertised  a string inside the image about itself -- "MPSS.AT.4.0",
+#               "MSM8998", "QC_IMAGE_VERSION_STRING=..." -- which is what the
+#               image claims, not proof of what runs
+#   unobserved  no magic this module knows, no vendor token, no version string
+#
+# Container magics, all at offset 0 unless the row says otherwise:
+#   1f 8b                    gzip        RFC 1952 §2.3.1
+#   42 5a 68                 bzip2       the "BZh" stream header
+#   fd 37 7a 58 5a 00        xz          XZ file format §2.1.1.1 (6 octets)
+#   28 b5 2f fd              zstd        RFC 8878 §3.1.1.1
+#   5d 00 00                 lzma-alone
+#   50 4b 03 04              zip
+#   68 73 71 73              squashfs    "hsqs" (0x73717368) superblock at 0
+#   55 42 49 23              UBI         UBI-EC header magic 0x55424923
+#   27 05 19 56              cramfs
+#   85 72                    JFFS2       jffs2_unknown_node magic 0x1985
+#   41 4e 44 52 49 4f 44 21  "ANDROID!" boot image (AOSP bootimg.h)
+#   7f 45 4c 46              ELF
+#   ext2/3/4                 magic 0x53 0xef at offset 0x438 (1024 + 56)
+#
+# Nothing is unpacked: identifying a container is not reading its contents, and
+# an image inside an image stays unobserved until something unpacks it.
+bbnd_firmware_analyze() {   # <file> [--strings-cap <bytes>]
+    local file="${1:-}" cap=67108864
+    (($# > 0)) && shift
+    while (($#)); do
+        case "$1" in
+            --strings-cap) cap="${2:-67108864}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(bbnd_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    if [[ -z "$file" ]]; then
+        printf 'ERROR\tusage: --firmware-analyze <file> [--strings-cap <bytes>]\n' >&2
+        return 2
+    fi
+    if [[ ! -r "$file" || -d "$file" ]]; then
+        printf 'ERROR\tcannot read %s\n' "$(bbnd_sanitize "$file")" >&2
+        printf 'WHY\ta firmware image has to be a readable file; nothing is identified from a path that is not there\n' >&2
+        return 1
+    fi
+
+    local size digest magic container filesystem compression basis
+    local vendor='' vendor_tok='' vendor_hits=0 model='' version=''
+    size=$(wc -c < "$file" | tr -d ' ')
+    digest=$(command -v sha256sum >/dev/null 2>&1 && sha256sum "$file" | cut -d' ' -f1 || printf 'unobserved')
+    magic=$(head -c 8 "$file" | od -An -tx1 | tr -d ' \n')
+    container=''; filesystem=''; compression=''; basis=''
+    case "$magic" in
+        1f8b*)             container=gzip;     compression=gzip;  basis='RFC 1952 2.3.1: 1f 8b at offset 0' ;;
+        425a68*)           container=bzip2;    compression=bzip2; basis='BZh stream header at offset 0' ;;
+        fd377a585a00*)     container=xz;       compression=xz;    basis='XZ 2.1.1.1 magic fd 37 7a 58 5a 00' ;;
+        28b52ffd*)         container=zstd;     compression=zstd;  basis='RFC 8878 3.1.1.1 magic 28 b5 2f fd' ;;
+        5d0000*|5d0001*)   container=lzma;     compression=lzma;  basis='lzma-alone header at offset 0' ;;
+        504b0304*)         container=zip;      compression=none-detected; basis='PK 03 04 local file header at offset 0' ;;
+        68737173*)         container=squashfs; filesystem=squashfs; basis='0x73717368 "hsqs" superblock at offset 0' ;;
+        55424923*)         container=ubi;      filesystem=ubi;    basis='0x55424923 "UBI#" EC header magic' ;;
+        27051956*)         container=cramfs;   filesystem=cramfs; basis='cramfs superblock magic at offset 0' ;;
+        8572*)             container=jffs2;    filesystem=jffs2;  basis='jffs2_unknown_node magic 0x1985 at offset 0' ;;
+        414e4452494f4421*) container=android-boot; filesystem=''; basis='AOSP bootimg.h: "ANDROID!" at offset 0' ;;
+        7f454c46*)         container=elf;      filesystem='';     basis='ELF 7f 45 4c 46 at offset 0' ;;
+    esac
+    # ext2/3/4 is the one magic that is not at offset 0.
+    if [[ -z "$container" && "$size" -ge 1082 ]]; then
+        local sb; sb=$(dd if="$file" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        if [[ "$sb" == "53ef" ]]; then
+            container=ext234; filesystem=ext2/3/4
+            basis='0x53ef superblock magic at offset 0x438 (1024 + 56)'
+        fi
+    fi
+    [[ -n "$container" && -z "$compression" ]] && compression=none-detected
+
+    # Strings the image carries about itself. Advertised, not measured.
+    local scanlen=$cap
+    (( size < cap )) && scanlen=$size
+    local strs
+    strs=$(head -c "$scanlen" "$file" | tr -c '\11\12\40-\176' '\n' \
+        | awk 'length($0) >= 6 && length($0) <= 200' | head -c 4000000)
+    local vclass tok hits
+    for vclass in qualcomm mediatek samsung huawei intel unisoc broadcom quectel sierra telit nvidia; do
+        case "$vclass" in
+            qualcomm) tok='QUALCOMM|QCOM|QC_IMAGE|MSM[0-9]|MDM[0-9]|SDM[0-9]|SDX[0-9]' ;;
+            mediatek) tok='MediaTek|MTK|MT[0-9]{4}' ;;
+            samsung)  tok='Exynos|SAMSUNG' ;;
+            huawei)   tok='Balong|Hi[0-9]{3,4}|HUAWEI' ;;
+            intel)    tok='Intel|XMM[0-9]{3,4}|Infineon' ;;
+            unisoc)   tok='UNISOC|Spreadtrum|SC[0-9]{4}' ;;
+            broadcom) tok='Broadcom|BCM[0-9]{4}' ;;
+            quectel)  tok='Quectel' ;;
+            sierra)   tok='Sierra Wireless|SIERRA' ;;
+            telit)    tok='Telit' ;;
+            nvidia)   tok='NVIDIA|Tegra' ;;
+        esac
+        hits=$(printf '%s\n' "$strs" | grep -a -c -E "$tok" 2>/dev/null || true)
+        [[ -z "$hits" ]] && hits=0
+        if (( hits > 0 )); then
+            vendor=$vclass; vendor_tok=$tok; vendor_hits=$hits
+            break
+        fi
+    done
+    model=$(printf '%s\n' "$strs" \
+        | grep -a -o -E '(MSM|MDM|SDM|SDX|MT|SC|BCM|XMM|Hi|Exynos)[0-9]{3,4}' \
+        | head -1 || true)
+    version=$(printf '%s\n' "$strs" \
+        | grep -a -o -E 'QC_IMAGE_VERSION_STRING=[A-Za-z0-9._-]{2,40}|MPSS[._-][A-Za-z0-9._-]{2,40}|[A-Za-z0-9_.-]*_FW_[A-Za-z0-9._-]{2,40}|V[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]{0,24}' \
+        | head -1 || true)
+
+    printf 'file\t%s\n'         "$(bbnd_sanitize "$file")"
+    printf 'size\t%s\n'         "$size"
+    printf 'sha256\t%s\n'       "${digest:--}"
+    printf 'first_octets\t%s\n' "$(bbnd_sanitize "$magic")"
+    if [[ -n "$container" ]]; then
+        printf 'container\t%s\tmeasured\t%s\n' "$container" "$basis"
+    else
+        printf 'container\tunobserved\tmeasured\tthe first octets above match no container this module knows; nothing is guessed from a near-miss\n'
+    fi
+    if [[ -n "$compression" ]]; then
+        printf 'compression\t%s\tmeasured\tfrom the container magic\n' "$compression"
+    else
+        printf 'compression\tunobserved\tunobserved\tno compressor magic in the first octets\n'
+    fi
+    if [[ -n "$filesystem" ]]; then
+        printf 'filesystem\t%s\tmeasured\t%s\n' "$filesystem" "$basis"
+    elif [[ -n "$container" ]]; then
+        printf 'filesystem\tunobserved\tadvertised\tthe container is a compressor or a bare image: what it holds is unobserved until it is unpacked, and this verb does not unpack\n'
+    else
+        printf 'filesystem\tunobserved\tunobserved\tno filesystem magic and no compressor magic in the first octets\n'
+    fi
+    if (( vendor_hits > 0 )); then
+        printf 'vendor\t%s\tadvertised\t%s string(s) matching "%s" inside the image\n' "$vendor" "$vendor_hits" "$vendor_tok"
+    else
+        printf 'vendor\tunobserved\tunobserved\tno vendor token from this module table appears in the scanned strings\n'
+    fi
+    if [[ -n "$model" ]]; then
+        printf 'model\t%s\tadvertised\ta model token inside the image; it names a part, not the firmware that runs\n' "$(bbnd_sanitize "$model")"
+    else
+        printf 'model\tunobserved\tunobserved\tno model token (MSM/SDM/MT/Exynos/BCM/XMM...) in the scanned strings\n'
+    fi
+    if [[ -n "$version" ]]; then
+        printf 'version\t%s\tadvertised\ta version string inside the image, not a measurement of the running firmware\n' "$(bbnd_sanitize "$version")"
+    else
+        printf 'version\tunobserved\tunobserved\tno QC_IMAGE_VERSION_STRING / MPSS / *_FW_ / Vx.y.z pattern in the scanned strings\n'
+    fi
+    if (( scanlen < size )); then
+        printf 'strings_scope\t%s\tof\t%s\tnote\tstrings scanned from the head only; a version string past the cap stays unobserved\n' "$scanlen" "$size"
+    else
+        printf 'strings_scope\t%s\tof\t%s\tnote\twhole file scanned\n' "$scanlen" "$size"
+    fi
+    local verdict
+    if [[ -n "$container" ]]; then
+        verdict="container_identified:${container}"
+    elif [[ -n "$vendor$model$version" ]]; then
+        verdict='container_unobserved_strings_found'
+    else
+        verdict='nothing_identified'
+    fi
+    printf 'verdict\t%s\n' "$verdict"
+    printf 'ref\tcontainer magics as cited per row; vendor and version tokens are strings (advertised), never measurements\n'
+    printf 'limit\tthis reads container headers and strings; it does not unpack, does not validate a signature and does not compare against a CVE table (that is 54_baseband_exploit)\n'
+
+    # Append-only store: one row per image examined, header first.
+    local store ts
+    store="$BBND_DIR/firmware.tsv"
+    mkdir -p "$BBND_DIR" 2>/dev/null
+    if [[ ! -f "$store" ]]; then
+        printf 'ts\tfile\tsize\tsha256\tcontainer\tfilesystem\tvendor\tmodel\tversion\tverdict\n' > "$store"
+    fi
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$ts" "$(bbnd_sanitize "$file")" "$size" "${digest:--}" \
+        "${container:-unobserved}" "${filesystem:-unobserved}" "${vendor:-unobserved}" \
+        "$(bbnd_sanitize "${model:-unobserved}")" "$(bbnd_sanitize "${version:-unobserved}")" \
+        "$verdict" >> "$store"
+    printf 'store\t%s\n' "$store"
+    if [[ "$verdict" == nothing_identified ]]; then
+        printf 'WHY\tnothing in this image matched a container magic, a vendor token or a version pattern. That is unobserved, not clean: the file was read and it says nothing this module can read\n' >&2
+        return 1
+    fi
+    return 0
+}
+
 bbnd_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -1238,6 +1426,41 @@ bbnd_selftest() {
     chk status-framing    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="FRAMING"{print $2}' | grep -c '56_baseband_diag')" "1"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
+    # 5. --firmware-analyze: the container magic is measured, the vendor and
+    #    version strings are advertised, and a file with neither is unobserved
+    #    and refused (rc 1) rather than described.
+    printf '\037\213\010\000\000\000\000\000' > "$d/fw.gz"
+    printf 'hsqs\000\000\000\000QUALCOMM MSM8998 QC_IMAGE_VERSION_STRING=MPSS.AT.4.0.1' > "$d/fw.sq"
+    head -c 2048 /dev/zero > "$d/fw.ext"
+    printf 'S\357' | dd of="$d/fw.ext" bs=1 seek=1080 conv=notrunc 2>/dev/null
+    printf '\252\252\252\252\252\252\252\252\252\252\252\252' > "$d/fw.unk"
+    local fw
+    fw=$(bbnd_firmware_analyze "$d/fw.gz")
+    chk fw-gzip      "$(fld "$fw" container)" "gzip"
+    chk fw-gzip-b    "$(printf '%s\n' "$fw" | awk -F'\t' '$1=="container"{print $2"|"$3}')" "gzip|measured"
+    chk fw-gzip-fs   "$(fld "$fw" filesystem)" "unobserved"
+    chk fw-gzip-v    "$(fld "$fw" verdict)" "container_identified:gzip"
+    fw=$(bbnd_firmware_analyze "$d/fw.sq")
+    chk fw-squashfs  "$(fld "$fw" container)" "squashfs"
+    chk fw-vendor    "$(fld "$fw" vendor)" "qualcomm"
+    chk fw-vendor-b  "$(printf '%s\n' "$fw" | awk -F'\t' '$1=="vendor"{print $3}')" "advertised"
+    chk fw-model     "$(fld "$fw" model)" "MSM8998"
+    chk fw-version   "$(printf '%s\n' "$fw" | awk -F'\t' '$1=="version"{print ($2 ~ /MPSS/) ? "version-string" : "none"}')" "version-string"
+    chk fw-version-b "$(printf '%s\n' "$fw" | awk -F'\t' '$1=="version"{print $3}')" "advertised"
+    fw=$(bbnd_firmware_analyze "$d/fw.ext")
+    chk fw-ext4      "$(fld "$fw" container)" "ext234"
+    chk fw-ext4-b    "$(printf '%s\n' "$fw" | awk -F'\t' '$1=="container"{print ($4 ~ /0x438/) ? "offset-cited" : "no"}')" "offset-cited"
+    fw=$(bbnd_firmware_analyze "$d/fw.unk" 2>/dev/null)
+    chk fw-unknown   "$(fld "$fw" container)" "unobserved"
+    chk fw-unknown-v "$(fld "$fw" verdict)" "nothing_identified"
+    chk fw-unknown-rc "$(bbnd_firmware_analyze "$d/fw.unk" >/dev/null 2>&1; echo $?)" "1"
+    chk fw-missing   "$(bbnd_firmware_analyze "$d/none.bin" >/dev/null 2>&1; echo $?)" "1"
+    chk fw-noargs    "$(bbnd_firmware_analyze >/dev/null 2>&1; echo $?)" "2"
+    chk fw-store-hdr "$(head -1 "$BBND_DIR/firmware.tsv" 2>/dev/null | cut -f1)" "ts"
+    local fwrows
+    fwrows=$(awk -F'\t' 'NR>1' "$BBND_DIR/firmware.tsv" 2>/dev/null | grep -c . || true)
+    chk fw-store-rows "$(( fwrows >= 4 ))" "1"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1254,12 +1477,13 @@ bbnd_menu() {
   [4]  Generate a corpus
   [5]  Decode a NAS security header
   [6]  Triage a sanitizer log
-  [7]  Layer reference
-  [8]  Plan (handoff)
-  [9]  DIAG frame (via 56_baseband_diag)
-  [10] DIAG send to a modem tty
-  [11] Hand a payload off (write file, name the tool)
-  [12] RF submission file (SCPI)
+  [7]  Analyze a baseband firmware image
+  [8]  Layer reference
+  [9]  Plan (handoff)
+  [10] DIAG frame (via 56_baseband_diag)
+  [11] DIAG send to a modem tty
+  [12] Hand a payload off (write file, name the tool)
+  [13] RF submission file (SCPI)
   [0]  back
 M
         echo "  NOTE: --diag-send writes to the tty you name and nothing else"
@@ -1273,14 +1497,15 @@ M
                bbnd_corpus "$h" "$n" "$s"; read -rp "  enter " _ ;;
             5) read -rp "  nas hex> " h; bbnd_nas_hdr "$h"; read -rp "  enter " _ ;;
             6) read -rp "  log path> " p; bbnd_triage "$p"; read -rp "  enter " _ ;;
-            7) bbnd_layers; read -rp "  enter " _ ;;
-            8) bbnd_plan; read -rp "  enter " _ ;;
-            9) read -rp "  hex> " h; bbnd_diag_frame "$h"; read -rp "  enter " _ ;;
-            10) read -rp "  hex> " h; read -rp "  device> " p
+            7) read -rp "  image path> " p2; bbnd_firmware_analyze "$p2"; read -rp "  enter " _ ;;
+            8) bbnd_layers; read -rp "  enter " _ ;;
+            9) bbnd_plan; read -rp "  enter " _ ;;
+            10) read -rp "  hex> " h; bbnd_diag_frame "$h"; read -rp "  enter " _ ;;
+            11) read -rp "  hex> " h; read -rp "  device> " p
                 bbnd_diag_send "$h" --port "$p"; read -rp "  enter " _ ;;
-            11) read -rp "  hex> " h; read -rp "  framing (rrc|nas)> " f
+            12) read -rp "  hex> " h; read -rp "  framing (rrc|nas)> " f
                 bbnd_transmit "$h" --framing "${f:-rrc}"; read -rp "  enter " _ ;;
-            12) read -rp "  hex> " h; bbnd_rf_submit "$h"; read -rp "  enter " _ ;;
+            13) read -rp "  hex> " h; bbnd_rf_submit "$h"; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1315,6 +1540,7 @@ bbnd_cli_main() {
                           bbnd_corpus_min "${rest[0]:--}" "$_mref"; } ;;
         --nas-hdr)      bbnd_nas_hdr "${rest[0]:-}" ;;
         --triage)       bbnd_triage "${rest[0]:-}" ;;
+        --firmware-analyze) bbnd_firmware_analyze "${rest[@]}" ;;
         --layers)       bbnd_layers ;;
         --plan)         bbnd_plan ;;
         --diag-frame)   bbnd_diag_frame "${rest[@]}" ;;
@@ -1342,6 +1568,11 @@ Research half (no radio, no gate):
                           offsets nothing else covers, each trimmed to its window
   --nas-hdr <hex>         EPS NAS security header decode
   --triage <log|->        ASAN/UBSAN crash-log triage
+  --firmware-analyze <file> [--strings-cap <bytes>]
+                          identify a flash image: container magic, filesystem or
+                          compressor, and the vendor/model/version strings it
+                          carries (advertised, never measured); unobserved for the
+                          rest, and nothing is unpacked
   --layers                protocol-layer reference
   --plan                  over-the-air handoff plan
 

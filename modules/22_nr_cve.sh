@@ -653,6 +653,98 @@ ncve_sdr_rows() {
     printf 'sdr_index\t%s\n'  "${idx:-none}"
 }
 
+# ── --cve-search: query the bundle, and say where applicability comes from ──
+# The table above is the whole bundle. It carries the id, the kind, the class,
+# the testbed and one sentence -- it does NOT carry a CVSS score, an affected
+# version range or a patch state, because none of those numbers exists on this
+# machine and nothing may be downloaded to get one (AGENTS.md: no CVE feed).
+#
+# So version applicability is read from an on-disk table if one is there, and
+# reported `unobserved` when it is not. Nothing is guessed. The file looked for
+# is tools/cve-applicability.tsv, four columns, header first:
+#     id <TAB> source <TAB> affected <TAB> fixed
+# `source` is where a range came from (an advisory, a vendor page, a spec);
+# `affected` and `fixed` are the version strings that page states, and either
+# may be `-` when the source states only one end.
+ncve_applicability_path() {
+    printf '%s' "${IMSI_CVE_APPLICABILITY:-$IMSISTING_ROOT/tools/cve-applicability.tsv}"
+}
+
+ncve_applies_for() {   # <id> <table> -> affected<TAB>fixed<TAB>source; rc1 = no record
+    local id="${1:-}" tbl="${2:-}" rid rsrc raff rfix
+    [[ -n "$id" && -f "$tbl" ]] || return 1
+    while IFS=$'\t' read -r rid rsrc raff rfix; do
+        [[ -z "${rid:-}" || "$rid" == \#* ]] && continue
+        [[ "$rid" == "$id" ]] || continue
+        printf '%s\t%s\t%s\n' "${raff:--}" "${rfix:--}" "${rsrc:--}"
+        return 0
+    done < "$tbl"
+    return 1
+}
+
+ncve_cmd_cve_search() {
+    local term="${1:-}" tbl="${2:-}" log ts id kind cls needs label app
+    local applies affected fixed basis hits=0 line needle hay
+    if [[ -z "$term" ]]; then
+        printf 'ERROR\tusage: --cve-search <term> [applicability.tsv]\n' >&2
+        return 2
+    fi
+    tbl="${2:-$(ncve_applicability_path)}"
+    # Path computed at call time, never at load time: a selftest repoints
+    # NCVE_DIR at a scratch tree and a captured global would write into loot/.
+    log="$NCVE_DIR/cve_search.tsv"
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    mkdir -p "$NCVE_DIR" 2>/dev/null
+    if [[ ! -f "$log" ]]; then
+        printf 'ts\tterm\tid\tkind\tclass\tneeds\tapplies\taffected\tfixed_in\tbasis\tlabel\n' > "$log"
+    fi
+    printf 'id\tkind\tclass\tneeds\tapplies\taffected\tfixed_in\tbasis\tlabel\n'
+    needle=$(printf '%s' "$term" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+    while IFS=$'\t' read -r id kind cls needs label; do
+        [[ -z "${id:-}" || "$id" == \#* ]] && continue
+        hay=$(printf '%s %s %s %s %s' "$id" "$kind" "$cls" "$needs" "$label" \
+            | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+        case "$hay" in *"$needle"*) ;; *) continue ;; esac
+        if app=$(ncve_applies_for "$id" "$tbl"); then
+            affected=$(printf '%s\n' "$app" | cut -f1)
+            fixed=$(printf '%s\n' "$app" | cut -f2)
+            basis=$(printf '%s\n' "$app" | cut -f3)
+            case "$affected" in
+                -|none|'') applies='not-stated-by-source' ;;
+                *)         applies='version-range-stated' ;;
+            esac
+        else
+            applies='unobserved'
+            affected='-'; fixed='-'
+            if [[ -f "$tbl" ]]; then
+                basis="no applicability record for $id in $tbl"
+            else
+                basis="no applicability table on disk (looked for $tbl)"
+            fi
+        fi
+        line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+            "$(ncve_sanitize "$id")" "$(ncve_sanitize "$kind")" \
+            "$(ncve_sanitize "$cls")" "$(ncve_sanitize "$needs")" \
+            "$applies" "$(ncve_sanitize "$affected")" "$(ncve_sanitize "$fixed")" \
+            "$(ncve_sanitize "$basis")" "$(ncve_sanitize "$label")")
+        printf '%s\n' "$line"
+        printf '%s\t%s\t%s\n' "$ts" "$(ncve_sanitize "$term")" "$line" >> "$log"
+        hits=$((hits + 1))
+    done < <(ncve_cve_table)
+    if [[ -f "$tbl" ]]; then
+        printf 'summary\tmatches\t%s\tapplicability\t%s\n' "$hits" "$(ncve_sanitize "$tbl")"
+    else
+        printf 'summary\tmatches\t%s\tapplicability\tunobserved\treason\t%s\n' \
+            "$hits" "$(ncve_sanitize "no table at $tbl")"
+    fi
+    if (( hits == 0 )); then
+        printf 'note\tno row in the bundled table matches "%s"; the bundle holds %s ids, and an id this tree does not carry is unobserved here -- not absent from the standard\n' \
+            "$(ncve_sanitize "$term")" "$(ncve_id_count)"
+        return 1
+    fi
+    return 0
+}
+
 ncve_cli_status_tsv() {
     local plans
     plans=$(find "$NCVE_PLANS" -type f -name 'plan_*.txt' 2>/dev/null | wc -l | tr -d ' ')
@@ -662,6 +754,8 @@ ncve_cli_status_tsv() {
     printf 'handoffs\t%s\n' "$(ncve_ids_of_kind handoff | grep -c . || true)"
     printf 'runs\t%s\n'     "$(ncve_run_count)"
     printf 'plans\t%s\n'    "$plans"
+    printf 'applicability\t%s\n'  "$( [[ -f "$(ncve_applicability_path)" ]] \
+        && ncve_applicability_path || printf 'unobserved')"
     ncve_sdr_rows
     printf 'dir\t%s\n'      "$NCVE_DIR"
     printf 'runs_file\t%s\n' "$NCVE_RUNS"
@@ -1134,6 +1228,22 @@ NRF
     chk reach-unknown      "$(ncve_reachability NOPE-0000 >/dev/null 2>&1; echo $?)" "1"
 
 
+
+    # --cve-search: hits come from the bundle, the applicability column comes
+    # from a table on disk, and a term with no row is a refusal (rc 1), not an
+    # empty table that reads like "clean".
+    local cs_app cs_rc cs_rows
+    chk cve-search-hit      "$(ncve_cmd_cve_search CVE-2020-12592 | awk -F'\t' '$1=="CVE-2020-12592"' | grep -c .)" "1"
+    chk cve-search-unobs    "$(ncve_cmd_cve_search CVE-2020-12592 | awk -F'\t' '$1=="CVE-2020-12592"{print $5}')" "unobserved"
+    chk cve-search-basis    "$(ncve_cmd_cve_search CVE-2020-12592 | awk -F'\t' '$1=="CVE-2020-12592"{print ($8 ~ /no applicability table on disk/) ? "names-the-file" : "other"}')" "names-the-file"
+    printf 'id\tsource\taffected\tfixed\nCVE-2020-12592\tadvisory A\t< 1.2\t1.2\n' > "$d/applicability.tsv"
+    cs_app=$(ncve_cmd_cve_search CVE-2020-12592 "$d/applicability.tsv" | awk -F'\t' '$1=="CVE-2020-12592"{print $5"|"$6"|"$7}')
+    chk cve-search-applies  "$cs_app" "version-range-stated|< 1.2|1.2"
+    ncve_cmd_cve_search zzz-not-a-cve >/dev/null 2>&1; cs_rc=$?
+    chk cve-search-miss-rc  "$cs_rc" "1"
+    cs_rows=$(awk -F'\t' 'NR>1' "$NCVE_DIR/cve_search.tsv" 2>/dev/null | grep -c . || true)
+    chk cve-search-store    "$(( cs_rows > 0 ))" "1"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1159,6 +1269,7 @@ ncve_menu() {
   [10] show the 5G privacy findings
   [11] decode an S-NSSAI
   [12] show run history
+  [13] search the table by keyword (applicability stated or unobserved)
   [0]  back
 
 M
@@ -1181,6 +1292,8 @@ M
                 read -rp "  press enter " _ ;;
             12) ncve_cmd_runs_tsv | column -t -s$'\t' 2>/dev/null || ncve_cmd_runs_tsv
                 read -rp "  press enter " _ ;;
+            13) read -rp "  term> " i; ncve_cmd_cve_search "$i"
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1194,6 +1307,7 @@ ncve_cli_main() {
     case "$cmd" in
         --status-tsv)   ncve_cli_status_tsv ;;
         --list-cves)    ncve_cmd_list_cves ;;
+        --cve-search)  ncve_cmd_cve_search "${1:-}" "${2:-}" ;;
         --list-findings) ncve_cmd_list_findings ;;
         --run-cve)      ncve_run_cve "${1:-}" ;;
         --probe)        ncve_cmd_probe "${1:-}" ;;
@@ -1210,6 +1324,10 @@ ncve_cli_main() {
 Usage: $0 COMMAND
   --status-tsv              module state as TSV
   --list-cves               every documented id, with kind and required testbed
+  --cve-search <term> [applicability.tsv]
+                            matches in the bundled table, each with the version
+                            applicability the on-disk table states -- or
+                            unobserved, and the file that was looked for
   --list-findings           the SUCI/SUPI, NRF, SEPP and slicing findings
   --run-cve <ID>            run the probe for ID, or write its handoff plan
   --probe <WHAT>            SBA|NRF|PFCP|N2N4|SEPP|SLICING|RRC|ASN1|LIBS|
