@@ -154,17 +154,6 @@ cannot.
 desk one temperature over — near-black surfaces with a warm bias and a single
 ember accent.
 
-A theme is one stylesheet and it restates colours, nothing else. It is not
-maintained by hand: `tools/gen-theme.py` derives it from `native/resources/style.css`
-(the base sheet), so a change there reaches both, and a theme that falls behind
-shows up as a diff instead of as one stale panel. The derivation warms the
-greys, turns the accent family ember, deepens the surfaces, and deliberately
-leaves every status hue alone — green still means ok and red still means danger,
-because a theme that recolours them makes the honest chips lie. GTK's own
-widgets (entries, popovers, tooltips, switches) are restated at the end of the
-generated file, since the base sheet never spoke for them and the system theme's
-version kept its navy field in a warm window.
-
 After changing the generator:
 
 ```bash
