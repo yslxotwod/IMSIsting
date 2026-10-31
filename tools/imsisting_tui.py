@@ -46,6 +46,7 @@ class Module:
     verbs: tuple[str, ...] = ()
     groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
     description: str = ""
+    root: str = ""
 
 
 @dataclass(frozen=True)
@@ -213,7 +214,7 @@ def parse_gui(root: Path) -> tuple[dict[str, str], dict[str, tuple[tuple[str, tu
     return descriptions, views
 
 
-def parse_table_text(text: str) -> list[Module]:
+def parse_table_text(text: str, root: str = "") -> list[Module]:
     """Read the launcher's navigation table into modules, without sourcing it.
 
     Kept as its own function because the launcher table is the only place the
@@ -226,7 +227,26 @@ def parse_table_text(text: str) -> list[Module]:
         if line.startswith('"') and line.endswith('"'):
             fields = line[1:-1].split("|")
             if len(fields) >= 5:
-                modules.append(Module(*fields[:5]))
+                modules.append(Module(*fields[:5], root=root))
+    return modules
+
+
+def parse_table_tsv(path: Path) -> list[Module]:
+    """Read a combined toolkit table TSV into modules.
+
+    Format (tab-separated):
+      root    key    category    title    function    module_id
+    """
+    modules: list[Module] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) >= 6:
+            modules.append(Module(category=fields[2], key=fields[1],
+                                  title=fields[3], function=fields[4],
+                                  module_id=fields[5], root=fields[0]))
     return modules
 
 
@@ -310,19 +330,42 @@ def verb_title(verb: str) -> str:
     return verb.removeprefix("--").replace("-", " ").title()
 
 
+def _strip_prefix(category: str) -> str:
+    """Strip a toolkit prefix like 'imsisting:' from a category name."""
+    idx = category.find(":")
+    return category[idx + 1:] if idx >= 0 else category
+
+
 def category_title(category: str) -> str:
-    return f"[{CATEGORY_ICONS.get(category, '•')} ] {category}"
+    raw = _strip_prefix(category)
+    return f"[{CATEGORY_ICONS.get(raw, '•')} ] {category}"
+
+
+def module_script(module: Module, global_root: Path) -> Path:
+    """Return the script file for a module.
+
+    If the module has a root field, use that; otherwise fall back to the
+    global root.  This lets a TUI launched from one toolkit run modules from
+    another without changing how the TUI is called.
+    """
+    real_root = Path(module.root) if module.root else global_root
+    return real_root / "modules" / f"{module.module_id}.sh"
 
 
 def module_title(module: Module) -> str:
-    return f"[{CATEGORY_ICONS.get(module.category, '•')} ] {module.title}"
+    raw = _strip_prefix(module.category)
+    return f"[{CATEGORY_ICONS.get(raw, '•')} ] {module.title}"
 
 
 def grouped_actions(module: Module) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """Place CLI actions beneath the same named views used by the GUI."""
     actions = tuple(v for v in module.verbs
                     if v not in ("--menu", "--help")
-                    and v[2:] not in MODIFIERS) or ("--status-tsv",)
+                    and v[2:] not in MODIFIERS)
+    if not actions:
+        # For modules whose verbs were never indexed (websting, unindexed),
+        # show the two verbs every module supports.
+        actions = ("--help", "--selftest")
     pending = set(actions)
     groups: list[tuple[str, tuple[str, ...]]] = []
     for title, gui_verbs in module.groups:
@@ -347,6 +390,11 @@ def header_fields(root: Path, run: ActionRun | None) -> tuple[tuple[str, str], .
     """State line as label/value pairs, so the values can carry their own colour."""
     def value(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace").strip() if path.is_file() else ""
+    # Imsting-specific fields (TARGET, CASE) are only meaningful when
+    # the toolkit launcher owns these paths.  In --table-tsv mode they
+    # are clutter, so we skip them.
+    if os.environ.get("STINGLAB_COMBINED"):
+        return (("TASK", verb_title(run.command[2]) if run else "idle"),)
     target = ""
     for directory in (Path(os.environ.get("TMP_DIR", "/tmp/imsisting")), root / "tmp"):
         target = " ".join(value(directory / name) for name in ("target_rat", "target_arfcn", "target_plmn")
@@ -388,12 +436,14 @@ def detail_rows(module: Module | None, root: Path, width: int) -> list[tuple[str
     """What the empty half of the dashboard says about the selected module."""
     if module is None:
         return [("text", "no module matches the current filter")]
-    script = root / "modules" / f"{module.module_id}.sh"
+    script = module_script(module, root)
     groups = grouped_actions(module)
     rows: list[tuple[str, str]] = [("title", module_title(module)),
                                   ("meta", f"{module.module_id}  ·  {module.category}"),
-                                  ("meta", f"{len(module.verbs)} actions  ·  "
-                                           f"{'script present' if script.is_file() else 'script missing'}")]
+                                  ("meta", ("unknown actions" if not module.verbs
+                                            else f"{len(module.verbs)} actions")
+                                           + "  ·  " + ("script present" if script.is_file() else "script missing"))]
+
     if module.description:
         rows.append(("gap", ""))
         rows.extend(("text", line) for line in textwrap.wrap(module.description, max(12, width)))
@@ -445,7 +495,7 @@ def dashboard(win, modules, root, version, app_index, category, query, selected,
         put(win, 5 + i, 2, clip(label, left - 4),
             curses.A_REVERSE if cat == category else palette.text)
     for i, m in enumerate(matches[scroll:scroll + visible]):
-        present = (root / "modules" / f"{m.module_id}.sh").is_file()
+        present = module_script(m, root).is_file()
         attr = (curses.A_REVERSE if scroll + i == selected
                 else (palette.ok if present else palette.bad))
         put(win, top + i, left + 2,
@@ -594,9 +644,11 @@ def workspace(win, modules, current, cat, mod_pos, action_pos, output, args, out
     return category_modules, actions, action_pos
 
 
-def start_action(root, module, action, args):
-    command = ("bash", str(root / "modules" / f"{module.module_id}.sh"), action, *shlex.split(args))
-    proc = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+def start_action(_root, module, action, args):
+    script = module_script(module, _root)
+    command = ("bash", str(script), action, *shlex.split(args))
+    cwd = script.parent.parent  # the toolkit root where the module lives
+    proc = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     assert proc.stdout is not None; os.set_blocking(proc.stdout.fileno(), False)
     return ActionRun(proc, command)
 
@@ -706,13 +758,48 @@ def run_tui(win, modules, root, version):
 def main():
     parser = argparse.ArgumentParser(description="IMSIsting full-screen terminal workspace")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
-    parser.add_argument("--version", action="version", version=os.environ.get("IMSISTING_VERSION", "IMSIsting"))
-    root = parser.parse_args().root
+    parser.add_argument("--table-tsv", type=Path, default=None,
+                        help="Combined toolkit table (root\\tkey\\tcategory\\ttitle\\tfunction\\tmodule_id)")
+    parser.add_argument("--version", action="version",
+                        version=os.environ.get("IMSISTING_VERSION", "IMSIsting"))
+    args = parser.parse_args()
+    root = args.root
+    table_tsv = args.table_tsv
     if not sys.stdin.isatty() or not sys.stdout.isatty() or os.environ.get("TERM") in ("", "dumb"):
-        print("IMSIsting TUI needs an interactive terminal (TTY). Use --help, --list, or --gui.", file=sys.stderr); return 2
-    version_file = root / "VERSION"
-    version = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else "unknown"
-    return curses.wrapper(run_tui, parse_modules(root), root, version)
+        print("IMSIsting TUI needs an interactive terminal (TTY). Use --help, --list, or --gui.",
+              file=sys.stderr); return 2
+
+    if table_tsv is not None:
+        modules = parse_table_tsv(table_tsv)
+        # Enrich each module with verbs, views and descriptions from its own toolkit root
+        for tk_root in list(dict.fromkeys(m.root for m in modules)):
+            if not tk_root:
+                continue
+            r = Path(tk_root)
+            verbs: dict[str, tuple[str, ...]] = {}
+            idx = r / "module_index.tsv"
+            if idx.is_file():
+                for line in idx.read_text(encoding="utf-8", errors="replace").splitlines()[1:]:
+                    fields = line.split("\t")
+                    if len(fields) >= 4:
+                        verbs[fields[0]] = tuple(v for v in fields[3].split()
+                                                  if v.startswith("--"))
+            descriptions, views = parse_gui(r)
+            modules = [replace(m, verbs=verbs.get(m.module_id, ()),
+                               groups=views.get(m.module_id, ()),
+                               description=descriptions.get(m.module_id, ""))
+                       if m.root == tk_root else m
+                       for m in modules]
+        # Version: compact toolkits summary
+        toolkits = sorted({Path(m.root).name for m in modules if m.root})
+        tk_label = " + ".join(toolkits)
+        version = f"stinglab ({tk_label})"
+    else:
+        modules = parse_modules(root)
+        version_file = root / "VERSION"
+        version = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else "unknown"
+
+    return curses.wrapper(run_tui, modules, root, version)
 
 
 if __name__ == "__main__": raise SystemExit(main())

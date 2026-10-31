@@ -15,6 +15,14 @@
 # count the UE schedules with, not the delay in milliseconds. SIB19 is
 # decoded and built through the generated NR table (--sib19, --sib19-build).
 #
+# The other half is the orbit. SIB19 carries a state vector, and something has
+# to produce it: an element set is propagated with SGP4 (near-earth, Vallado
+# AIAA 2006-6753) to give where the satellite is over the next pass, which is
+# what turns the timing verbs above from a single measurement into a schedule.
+# Direct-to-device (a handset talking to a satellite with no dish) is the same
+# geometry read the other way round, which is why it lives here rather than in a
+# module of its own: one implementation per number.
+#
 # Attack owned: none direct — cell reconnaissance and timing analysis for NTN
 # access (extends 02_cell_recon and 12_nr_air to a satellite cell).
 #
@@ -55,6 +63,869 @@ declare -F warn >/dev/null 2>&1 || warn() { printf '[warn] %s\n' "$*" >&2; }
 declare -F err  >/dev/null 2>&1 || err()  { printf '[err]  %s\n' "$*" >&2; }
 declare -F ok   >/dev/null 2>&1 || ok()   { printf '[ok]   %s\n' "$*" >&2; }
 declare -F banner >/dev/null 2>&1 || banner() { :; }
+
+# ── orbital mechanics: the ephemeris half of NTN ────────────────────────
+# SIB19 tells a UE where the satellite is. Something has to work out where the
+# satellite is, and for a LEO that means propagating an element set rather than
+# reading a fixed latitude. SGP4 (Vallado, AIAA 2006-6753) is what the two-line
+# element sets the network broadcasts are defined against, so it is what this
+# module implements -- near-earth only, with a deep-space element set refused by
+# name instead of being propagated with the wrong model.
+#
+# Speed of light in km/s. Every delay here is a range divided by it.
+NTN_C_KM_S=299792.458
+# One LTE timing-advance step is 16 Ts with Ts = 1/(15000*2048) s = 0.5208 us.
+# NR keeps the same command granularity (16*64*Tc with Tc = 1/(480e3*4096)),
+# which lands on the same 0.5208 us -- so one constant is honest for both.
+NTN_TA_STEP_US=0.5208
+# WGS-84 mean Earth radius, for footprints and horizon geometry.
+NTN_R_EARTH_KM=6371.0088
+
+
+# ── TLE parsing ─────────────────────────────────────────────────────────
+# A TLE is fixed-column, and the columns are the specification: the eccentricity
+# has an implied leading decimal point, the epoch is a two-digit year plus a
+# fractional day of year, and the last character of each line is a mod-10
+# checksum where '-' counts as 1. A parser that splits on whitespace reads the
+# wrong field the first time a number loses its leading space.
+ntn_tle_checksum() {
+    printf '%s' "${1:-}" | awk '{
+        s=0
+        for (i=1; i<length($0); i++) {
+            c=substr($0,i,1)
+            if (c ~ /[0-9]/) s += c+0
+            else if (c == "-") s += 1
+        }
+        print s % 10
+    }'
+}
+
+ntn_tle_get() {
+    local file="${1:-}" which="${2:-1}"
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read TLE file %s\n' "$file" >&2; return 2; }
+    # A three-line element set starts with the object name; a two-line one does
+    # not. Pick the first line that actually starts with "1 ".
+    awk -v want="$which" '
+        /^1 / { n++; if (n==1) l1=$0 }
+        /^2 / { if (l1 != "" && l2 == "") l2=$0 }
+        END {
+            if (want==1) print l1; else print l2
+        }' "$file"
+}
+
+ntn_tle_parse() {
+    local file="${1:-}"
+    local l1 l2
+    l1=$(ntn_tle_get "$file" 1) || return $?
+    l2=$(ntn_tle_get "$file" 2) || return $?
+    [[ -n "$l1" && -n "$l2" ]] || {
+        printf 'GUARD\tno-two-line-element-set\trefusing: the file has no line starting "1 " followed by one starting "2 ". An empty parse would read as a satellite with no orbit.\n'
+        return 1; }
+
+    printf 'field\tvalue\tnote\n'
+    printf 'line1\t%s\t\n' "$(ntn_sanitize "$l1")"
+    printf 'line2\t%s\t\n' "$(ntn_sanitize "$l2")"
+    printf 'satnum\t%s\t\n' "$(ntn_sanitize "$(printf '%s' "$l1" | cut -c3-7 | tr -d ' ')")"
+
+    local yy ddd year iso
+    yy=$(printf '%s' "$l1" | cut -c19-20 | tr -d ' ')
+    ddd=$(printf '%s' "$l1" | cut -c21-32 | tr -d ' ')
+    if [[ "$yy" =~ ^[0-9]+$ ]]; then
+        # The pivot is 57: a two-digit year below it is 20xx, at or above it 19xx.
+        if (( 10#$yy < 57 )); then year=$((2000 + 10#$yy)); else year=$((1900 + 10#$yy)); fi
+        printf 'epoch-year\t%s\tTLE two-digit year, pivot 57\n' "$year"
+        printf 'epoch-day\t%s\tfractional day of year\n' "$ddd"
+        iso=$(ntn_epoch_iso "$year" "$ddd")
+        printf 'epoch-utc\t%s\t\n' "$iso"
+    else
+        printf 'epoch-year\tunobserved\tthe epoch column is not numeric\n'
+        iso=""
+    fi
+
+    printf 'inclination-deg\t%s\tcolumns 9-16\n' "$(printf '%s' "$l2" | cut -c9-16 | tr -d ' ')"
+    printf 'raan-deg\t%s\tcolumns 18-25\n' "$(printf '%s' "$l2" | cut -c18-25 | tr -d ' ')"
+    local eccraw; eccraw=$(printf '%s' "$l2" | cut -c27-33 | tr -d ' ')
+    printf 'eccentricity\t0.%s\timplied leading decimal point\n' "$eccraw"
+    printf 'argp-deg\t%s\tcolumns 35-42\n' "$(printf '%s' "$l2" | cut -c35-42 | tr -d ' ')"
+    printf 'mean-anomaly-deg\t%s\tcolumns 44-51\n' "$(printf '%s' "$l2" | cut -c44-51 | tr -d ' ')"
+    local mm; mm=$(printf '%s' "$l2" | cut -c53-63 | tr -d ' ')
+    printf 'mean-motion-revday\t%s\tcolumns 53-63\n' "$mm"
+    if [[ "$mm" =~ ^[0-9.]+$ ]]; then
+        awk -v n="$mm" 'BEGIN{
+            period = 1440.0 / n
+            printf "period-min\t%.4f\tderived: 1440 / mean motion\n", period
+            # semi-major axis from the third law of Kepler, mu = 398600.8 km^3/s^2
+            mu = 398600.8
+            secs = period * 60.0
+            a = (mu * (secs/(2*3.141592653589793))^2) ^ (1.0/3.0)
+            printf "semi-major-axis-km\t%.3f\tderived from period and mu\n", a
+            printf "apogee-km\t%.1f\tderived\n", a*(1+ecc) - 6378.135
+            printf "perigee-km\t%.1f\tderived; below 220 km a decayed orbit is likely\n", a*(1-ecc) - 6378.135
+        }' ecc="${eccraw:-0}" 2>/dev/null || true
+    fi
+
+    local c1 c2
+    c1=$(printf '%s' "$l1" | cut -c69-69)
+    c2=$(printf '%s' "$l2" | cut -c69-69)
+    if [[ "$c1" =~ ^[0-9]$ ]]; then
+        printf 'checksum-line1\t%s\tcomputed %s\n' "$c1" "$(ntn_tle_checksum "$l1")"
+    else
+        printf 'checksum-line1\tunobserved\tno checksum column present\n'
+    fi
+    if [[ "$c2" =~ ^[0-9]$ ]]; then
+        printf 'checksum-line2\t%s\tcomputed %s\n' "$c2" "$(ntn_tle_checksum "$l2")"
+    else
+        printf 'checksum-line2\tunobserved\tno checksum column present\n'
+    fi
+    printf 'verdict\tparsed\tmeasured\n'
+}
+
+# Year + fractional day of year -> ISO 8601 UTC. Done in awk because the day
+# fraction has to survive; date(1) cannot add a fractional day.
+ntn_epoch_iso() {
+    awk -v y="$1" -v d="$2" 'BEGIN{
+        if (d == "") { print "unobserved"; exit }
+        doy = d + 0
+        secs = (doy - 1) * 86400
+        # days from 1970-01-01 to Jan 1 of year y
+        days = 0
+        for (yy = 1970; yy < y; yy++) days += ((yy%4==0 && yy%100!=0) || yy%400==0) ? 366 : 365
+        t = (days*86400) + secs
+        printf "%s\n", strftime("%Y-%m-%dT%H:%M:%SZ", t, 1)
+    }'
+}
+
+# ── SGP4 ────────────────────────────────────────────────────────────────
+# The near-earth branch of SGP4, WGS-72 constants, exactly as published in
+# Vallado's sgp4unit. The deep-space (SDP4) branch is deliberately absent: the
+# D2D constellations are all well inside the 225-minute period boundary, and an
+# implementation that silently fell back to a truncated model for a
+# geostationary satellite would be confidently wrong about a satellite that
+# moves 0 degrees per second. A deep-space element set is refused by name.
+ntn_sgp4() {
+    local l1="${1:-}" l2="${2:-}" tsince="${3:-0}"
+    awk -v L1="$l1" -v L2="$l2" -v TSINCE="$tsince" '
+    function absv(x) { return x < 0 ? -x : x }
+    BEGIN {
+        pi = atan2(0, -1); twopi = 2*pi; x2o3 = 2.0/3.0
+        mu = 398600.8; radiusearthkm = 6378.135; j2 = 0.001082616
+        j3 = -0.00000253881; j4 = -0.00000165597; j3oj2 = j3/j2
+        xpdotp = 1440.0/twopi
+        xke = 60.0/sqrt(radiusearthkm*radiusearthkm*radiusearthkm/mu)
+
+        # fixed columns, both lines
+        yy   = substr(L1,19,2) + 0
+        doy  = substr(L1,21,12) + 0
+        bstr = substr(L1,54,8)
+        bs   = substr(bstr,1,1) == "-" ? -1 : 1
+        bmant= substr(bstr,2,5) + 0
+        bexp = substr(bstr,7,1) == "-" ? -1 : 1
+        bdig = substr(bstr,8,1) + 0
+        bstar = bs * bmant * 1e-5 * (bexp < 0 ? 10^(-bdig) : 10^(bdig))
+        if (substr(bstr,7,1) == "") bstar = 0
+
+        inclo = substr(L2,9,16)  * pi/180
+        nodeo = substr(L2,18,25) * pi/180
+        ecco  = (substr(L2,27,7) + 0)/1e7
+        argpo = substr(L2,35,42) * pi/180
+        mo    = substr(L2,44,51) * pi/180
+        mmrev = substr(L2,53,11) + 0
+        if (mmrev <= 0) { print "GUARD\tmean-motion-unreadable\tthe element set has no usable mean motion"; exit 1 }
+        no_kozai = mmrev/xpdotp
+        if (1440.0/mmrev > 225.0) {
+            print "GUARD\tdeep-space-element-set\tperiod " (1440.0/mmrev) " min is beyond the 225-minute near-earth boundary; this module implements SGP4 only and will not pretend SDP4 is the same model"
+            exit 1
+        }
+
+        cosio = cos(inclo); sinio = sin(inclo)
+        eccsq = ecco*ecco; omeosq = 1-eccsq; rteosq = sqrt(omeosq)
+        cosio2 = cosio*cosio
+        ak = (xke/no_kozai)^x2o3
+        d1 = 0.75*j2*(3*cosio2-1)/(rteosq*omeosq)
+        del = d1/(ak*ak)
+        adel = ak*(1 - del*del - del*(1.0/3.0 + 134.0*del*del/81.0))
+        del = d1/(adel*adel)
+        no_unkozai = no_kozai/(1+del)
+        ao = (xke/no_unkozai)^x2o3
+        po = ao*omeosq
+        posq = po*po
+        rp = ao*(1-ecco)
+        con42 = 1-5*cosio2
+        con41 = -con42-cosio2-cosio2
+        x1mth2 = 1-cosio2
+        x7thm1 = 7*cosio2-1
+
+        # Below a 220 km perigee the model switches to the simplified drag
+        # equations, which means the full drag terms are NOT applied at all. A
+        # satellite at 198 km perigee and one at 650 km differ in that one flag,
+        # and ignoring it costs a tenth of a kilometre after two hours while
+        # leaving the epoch state exact — which is why the selftest asserts a
+        # state that is not at the epoch.
+        isimp = (rp < (220.0/radiusearthkm + 1.0)) ? 1 : 0
+        # sfour is NOT a function of isimp: it starts at 78 km for every orbit and
+        # only changes below a 156 km perigee. Tying it to isimp shrinks it to
+        # 20 km for a satellite at 198 km perigee and quietly rescales every drag
+        # coefficient, which is invisible at the epoch and worth a tenth of a
+        # kilometre two hours in.
+        sfour = 78.0/radiusearthkm + 1.0
+        qzms24 = ((120.0-78.0)/radiusearthkm)^4
+        perige = (rp-1.0)*radiusearthkm
+        if (perige < 156.0) {
+            sfour = perige - 78.0
+            if (perige < 98.0) sfour = 20.0
+            qzms24 = ((120.0-sfour)/radiusearthkm)^4
+            sfour = sfour/radiusearthkm + 1.0
+        }
+
+        pinvsq = 1/posq
+        tsi = 1/(ao-sfour)
+        eta = ao*ecco*tsi
+        etasq = eta*eta
+        eeta = ecco*eta
+        psisq = absv(1-etasq)
+        coef = qzms24*tsi^4
+        coef1 = coef/psisq^3.5
+        cc2 = coef1*no_unkozai*(ao*(1+1.5*etasq+eeta*(4+etasq)) + 0.375*j2*tsi/psisq*con41*(8+3*etasq*(8+etasq)))
+        cc1 = bstar*cc2
+        cc3 = 0
+        if (ecco > 1e-4) cc3 = -2*coef*tsi*j3oj2*no_unkozai*sinio/ecco
+        cc4 = 2*no_unkozai*coef1*ao*omeosq*(eta*(2+0.5*etasq) + ecco*(0.5+2*etasq) - j2*tsi/(ao*psisq)*(-3*con41*(1-2*eeta+etasq*(1.5-0.5*eeta)) + 0.75*x1mth2*(2*etasq-eeta*(1+etasq))*cos(2*argpo)))
+        cc5 = 2*coef1*ao*omeosq*(1+2.75*(etasq+eeta)+eeta*etasq)
+        cosio4 = cosio2*cosio2
+        temp1 = 1.5*j2*pinvsq*no_unkozai
+        temp2 = 0.5*temp1*j2*pinvsq
+        temp3 = -0.46875*j4*pinvsq*pinvsq*no_unkozai
+        mdot = no_unkozai + 0.5*temp1*rteosq*con41 + 0.0625*temp2*rteosq*(13-78*cosio2+137*cosio4)
+        argpdot = -0.5*temp1*con42 + 0.0625*temp2*(7-114*cosio2+395*cosio4) + temp3*(3-36*cosio2+49*cosio4)
+        xhdot1 = -temp1*cosio
+        nodedot = xhdot1 + (0.5*temp2*(4-19*cosio2) + 2*temp3*(3-7*cosio2))*cosio
+        omgcof = bstar*cc3*cos(argpo)
+        xmcof = 0
+        if (ecco > 1e-4) xmcof = -x2o3*coef*bstar/eeta
+        t2cof = 1.5*cc1
+        nodecf = 3.5*omeosq*xhdot1*cc1
+        # Signs and factors are the ones in the reference implementation, not the
+        # ones in the older published listing: aycof is -0.5 and xlcof is -0.25.
+        # Getting either a factor of two or a sign wrong moves the epoch state by
+        # kilometres while leaving the orbit plausible, which is why the selftest
+        # asserts against an independent implementation rather than against
+        # numbers this module produced.
+        if (absv(cosio+1.0) > 1.5e-12) xlcof = -0.25*j3oj2*sinio*(3+5*cosio)/(1+cosio)
+        else xlcof = -0.25*j3oj2*sinio*(3+5*cosio)/1.5e-12
+        aycof = -0.5*j3oj2*sinio
+        delmo = (1+eta*cos(mo))^3
+        sinmao = sin(mo)
+        cc1sq = cc1*cc1
+        d2 = 4*ao*tsi*cc1sq
+        tmp = d2*tsi*cc1/3
+        d3 = (17*ao+sfour)*tmp
+        d4 = 0.5*tmp*ao*tsi*(221*ao+31*sfour)*cc1
+        t3cof = d2 + 2*cc1sq
+        t4cof = 0.25*(3*d3 + cc1*(12*d2+10*cc1sq))
+        t5cof = 0.2*(3*d4 + 12*cc1*d3 + 6*d2*d2 + 15*cc1sq*(2*d2+cc1sq))
+
+        t = TSINCE + 0
+        xmdf = mo + mdot*t
+        argpdf = argpo + argpdot*t
+        nodedf = nodeo + nodedot*t
+        argpm = argpdf
+        mm = xmdf
+        t2 = t*t
+        nodem = nodedf + nodecf*t2
+        tempa = 1 - cc1*t
+        tempe = bstar*cc4*t
+        templ = t2cof*t2
+        if (isimp == 0) {
+            delomg = omgcof*t
+            delmtemp = 1 + eta*cos(xmdf)
+            delm = xmcof*(delmtemp*delmtemp*delmtemp - delmo)
+            temp = delomg + delm
+            mm = xmdf + temp
+            argpm = argpdf - temp
+            t3 = t2*t; t4 = t3*t
+            tempa = tempa - d2*t2 - d3*t3 - d4*t4
+            tempe = tempe + bstar*cc5*(sin(mm) - sinmao)
+            templ = templ + t3cof*t3 + t4*(t4cof + t*t5cof)
+        }
+
+        nm = no_unkozai
+        em = ecco
+        inclm = inclo
+        am = (xke/nm)^x2o3*tempa*tempa
+        nm = xke/am^1.5
+        em = em - tempe
+        if (em >= 1.0 || em < -0.001) { print "GUARD\teccentricity-out-of-range\tpropagation left the orbit: e=" em; exit 1 }
+        if (em < 1e-6) em = 1e-6
+        mm = mm + no_unkozai*templ
+        xlm = mm + argpm + nodem
+        emsq = em*em
+        temp = 1-emsq
+        nodem = nodem - twopi*int(nodem/twopi)
+        argpm = argpm - twopi*int(argpm/twopi)
+        xlm = xlm - twopi*int(xlm/twopi)
+        mm = xlm - argpm - nodem
+        sinip = sin(inclm); cosip = cos(inclm)
+        axnl = em*cos(argpm)
+        temp = 1/(am*(1-em*em))
+        aynl = em*sin(argpm) + temp*aycof
+        xl = mm + argpm + nodem + temp*xlcof*axnl
+
+        u = xl - nodem
+        u = u - twopi*int(u/twopi)
+        eo1 = u
+        for (k = 1; k <= 10; k++) {
+            sineo1 = sin(eo1); coseo1 = cos(eo1)
+            temp = 1 - coseo1*axnl - sineo1*aynl
+            temp = (u - aynl*coseo1 + axnl*sineo1 - eo1)/temp
+            eo1 = eo1 + temp
+            if (absv(temp) <= 1e-12) break
+        }
+        sineo1 = sin(eo1); coseo1 = cos(eo1)
+        ecose = axnl*coseo1 + aynl*sineo1
+        esine = axnl*sineo1 - aynl*coseo1
+        el2 = axnl*axnl + aynl*aynl
+        pl = am*(1-el2)
+        if (pl < 0) { print "GUARD\tnegative-semi-latus-rectum\tthe propagated state is not an ellipse"; exit 1 }
+        rl = am*(1-ecose)
+        rdotl = sqrt(am)*esine/rl
+        rvdotl = sqrt(pl)/rl
+        betal = sqrt(1-el2)
+        temp = esine/(1+betal)
+        sinu = am/rl*(sineo1 - aynl - axnl*temp)
+        cosu = am/rl*(coseo1 - axnl + aynl*temp)
+        su = atan2(sinu, cosu)
+        sin2u = 2*sinu*cosu
+        cos2u = 1-2*sinu*sinu
+        temp = 1/pl; temp1 = 0.5*j2*temp; temp2 = temp1*temp
+        mrt = rl*(1 - 1.5*temp2*betal*con41) + 0.5*temp1*x1mth2*cos2u
+        su = su - 0.25*temp2*x7thm1*sin2u
+        xnode = nodem + 1.5*temp2*cosip*sin2u
+        xinc = inclm + 1.5*temp2*cosip*sinip*cos2u
+        mvt = rdotl - nm*temp1*x1mth2*sin2u/xke
+        rvdot = rvdotl + nm*temp1*(x1mth2*cos2u + 1.5*con41)/xke
+
+        sinsu = sin(su); cossu = cos(su)
+        snod = sin(xnode); cnod = cos(xnode)
+        sini = sin(xinc); cosi = cos(xinc)
+        xmx = -snod*cosi; xmy = cnod*cosi
+        ux = xmx*sinsu + cnod*cossu
+        uy = xmy*sinsu + snod*cossu
+        uz = sini*sinsu
+        vx = xmx*cossu - cnod*sinsu
+        vy = xmy*cossu - snod*sinsu
+        vz = sini*cossu
+        rk = mrt*radiusearthkm
+        vkmpersec = radiusearthkm*xke/60.0
+        printf "%.8f\t%.8f\t%.8f\n", rk*ux, rk*uy, rk*uz
+        printf "%.8f\t%.8f\t%.8f\n", vkmpersec*(mvt*ux+rvdot*vx), vkmpersec*(mvt*uy+rvdot*vy), vkmpersec*(mvt*uz+rvdot*vz)
+    }'
+}
+
+ntn_sgp4_report() {
+    local file="${1:-}" tsince="${2:-0}"
+    local l1 l2 out
+    l1=$(ntn_tle_get "$file" 1) || return $?
+    l2=$(ntn_tle_get "$file" 2) || return $?
+    if [[ -z "$l1" || -z "$l2" ]]; then
+        printf 'GUARD\tno-two-line-element-set\trefusing: no element set to propagate\n'
+        return 1
+    fi
+    out=$(ntn_sgp4 "$l1" "$l2" "$tsince")
+    if [[ "$out" == GUARD* ]]; then printf '%s\n' "$out"; return 1; fi
+    local rx ry rz vx vy vz
+    rx=$(printf '%s' "$out" | sed -n 1p | cut -f1)
+    ry=$(printf '%s' "$out" | sed -n 1p | cut -f2)
+    rz=$(printf '%s' "$out" | sed -n 1p | cut -f3)
+    vx=$(printf '%s' "$out" | sed -n 2p | cut -f1)
+    vy=$(printf '%s' "$out" | sed -n 2p | cut -f2)
+    vz=$(printf '%s' "$out" | sed -n 2p | cut -f3)
+    printf 'frame\tTEME\tSGP4 native frame\n'
+    printf 'tsince-min\t%s\tminutes from the element-set epoch\n' "$tsince"
+    printf 'x-km\t%s\t\n' "$rx"
+    printf 'y-km\t%s\t\n' "$ry"
+    printf 'z-km\t%s\t\n' "$rz"
+    printf 'vx-kms\t%s\t\n' "$vx"
+    printf 'vy-kms\t%s\t\n' "$vy"
+    printf 'vz-kms\t%s\t\n' "$vz"
+    printf '%s\n' "$out" | awk '
+        NR==1 { r=sqrt($1*$1+$2*$2+$3*$3); printf "radius-km\t%.3f\tderived\n", r;
+                printf "altitude-km\t%.3f\tabove the WGS-72 equatorial radius 6378.135\n", r-6378.135
+                lat = atan2($3, sqrt($1*$1+$2*$2)) * 180/atan2(0,-1)
+                printf "subpoint-lat-geocentric\t%.4f\tgeocentric, not geodetic\n", lat }
+        NR==2 { v=sqrt($1*$1+$2*$2+$3*$3); printf "speed-kms\t%.6f\tderived\n", v }
+    '
+    printf 'verdict\tpropagated\tmeasured\n'
+}
+
+# ── ground geometry ─────────────────────────────────────────────────────
+# Range and range-rate from a ground point to the satellite, in TEME. The
+# difference between TEME and ECEF is a rotation about the pole; for range it
+# cancels except through the ground station's longitude, which is where the
+# Greenwich sidereal angle enters. This uses the IAU-82 GMST series, accurate to
+# about a second of time over a few decades, which is far more than a pass
+# schedule needs and is stated here rather than implied.
+ntn_topocentric() {
+    local lat="$1" lon="$2" alt_km="$3" l1="$4" l2="$5" tsince="$6" epoch_jd="$7"
+    awk -v LAT="$lat" -v LON="$lon" -v ALT="$alt_km" -v L1="$l1" -v L2="$l2" \
+        -v TS="$tsince" -v EJD="$epoch_jd" '
+    function absv(x){ return x<0?-x:x }
+    BEGIN {
+        # SGP4 through a child process would need a pipe; instead re-run the same
+        # arithmetic by asking awk for it is not possible, so the caller passes
+        # the state in. This function is kept for the trig only.
+        pi = atan2(0,-1)
+        jd = EJD + (TS+0)/1440.0
+        tut1 = (jd - 2451545.0)/36525.0
+        gmst_sec = 67310.54841 + (876600.0*3600.0 + 8640184.812866)*tut1 \
+                   + 0.093104*tut1*tut1 - 6.2e-6*tut1*tut1*tut1
+        gmst = (gmst_sec - 86400.0*int(gmst_sec/86400.0))/240.0
+        printf "%.10f\n", gmst
+    }'
+}
+
+# Julian date from an ISO 8601 UTC string.
+ntn_jd() {
+    awk -v ISO="$1" 'BEGIN{
+        if (ISO == "") { print "unobserved"; exit }
+        y = substr(ISO,1,4)+0; mo = substr(ISO,6,2)+0; d = substr(ISO,9,2)+0
+        hh = substr(ISO,12,2)+0; mi = substr(ISO,15,2)+0; ss = substr(ISO,18,2)+0
+        if (mo <= 2) { y -= 1; mo += 12 }
+        a = int(y/100); b = 2 - a + int(a/4)
+        jd = int(365.25*(y+4716)) + int(30.6001*(mo+1)) + d + b - 1524.5
+        jd += (hh + mi/60.0 + ss/3600.0)/24.0
+        printf "%.8f\n", jd
+    }'
+}
+
+# Range, elevation and range-rate from a geodetic ground point to a TEME state,
+# in one awk pass. TEME is rotated into ECEF by GMST, then into the local
+# horizontal frame.
+ntn_look() {
+    local lat="$1" lon="$2" alt="$3" rx="$4" ry="$5" rz="$6" vx="$7" vy="$8" vz="$9" gmst="${10}"
+    awk -v LAT="$lat" -v LON="$lon" -v ALT="$alt" -v RX="$rx" -v RY="$ry" -v RZ="$rz" \
+        -v VX="$vx" -v VY="$vy" -v VZ="$vz" -v G="$gmst" '
+    function absv(x){ return x<0?-x:x }
+    BEGIN {
+        pi = atan2(0,-1); d2r = pi/180
+        lat = LAT*d2r; lon = LON*d2r
+        g = G*d2r
+        # TEME -> ECEF
+        ex =  cos(g)*RX + sin(g)*RY
+        ey = -sin(g)*RX + cos(g)*RY
+        ez =  RZ
+        evx =  cos(g)*VX + sin(g)*VY
+        evy = -sin(g)*VX + cos(g)*VY
+        evz =  VZ
+        # WGS-84 ellipsoid
+        a = 6378.137; f = 1/298.257223563; e2 = f*(2-f)
+        n = a/sqrt(1-e2*sin(lat)*sin(lat))
+        sx = (n+ALT)*cos(lat)*cos(lon)
+        sy = (n+ALT)*cos(lat)*sin(lon)
+        sz = (n*(1-e2)+ALT)*sin(lat)
+        dx = ex-sx; dy = ey-sy; dz = ez-sz
+        dvx = evx; dvy = evy; dvz = evz
+        rng = sqrt(dx*dx+dy*dy+dz*dz)
+        # local ENU basis
+        sl = sin(lat); cl = cos(lat); so = sin(lon); co = cos(lon)
+        east  = -so*dx + co*dy
+        north = -sl*co*dx - sl*so*dy + cl*dz
+        up    =  cl*co*dx + cl*so*dy + sl*dz
+        el = atan2(up, sqrt(east*east+north*north))/d2r
+        az = atan2(east, north)/d2r; if (az < 0) az += 360
+        # range-rate: the projection of the relative velocity on the line of sight
+        rr = (dx*dvx + dy*dvy + dz*dvz)/rng
+        printf "%.6f\t%.4f\t%.4f\t%.6f\n", rng, el, az, rr
+    }'
+}
+
+ntn_state_at() {
+    local file="$1" tsince="$2"
+    local l1 l2 out
+    l1=$(ntn_tle_get "$file" 1); l2=$(ntn_tle_get "$file" 2)
+    out=$(ntn_sgp4 "$l1" "$l2" "$tsince")
+    [[ "$out" == GUARD* ]] && { printf '%s\n' "$out"; return 1; }
+    printf '%s\n' "$out"
+}
+
+# Epoch as a unix timestamp, so a pass plan can be expressed against wall clock.
+ntn_epoch_ts() {
+    local file="$1"
+    local l1 yy ddd year iso
+    l1=$(ntn_tle_get "$file" 1)
+    yy=$(printf '%s' "$l1" | cut -c19-20 | tr -d ' ')
+    ddd=$(printf '%s' "$l1" | cut -c21-32 | tr -d ' ')
+    if (( 10#$yy < 57 )); then year=$((2000 + 10#$yy)); else year=$((1900 + 10#$yy)); fi
+    iso=$(ntn_epoch_iso "$year" "$ddd")
+    if [[ "$iso" == unobserved || -z "$iso" ]]; then return 1; fi
+    date -u -d "$iso" +%s 2>/dev/null || return 1
+}
+
+# ── pass plan ───────────────────────────────────────────────────────────
+# AOS/LOS from a ground point: sample the elevation at a fixed step, bracket the
+# horizon crossings, then bisect. A pass is reported with its maximum elevation
+# because a 5-degree pass and an 85-degree pass are different services.
+ntn_pass_plan() {
+    local lat="${1:-}" lon="${2:-}" file="${3:-}" hours="${4:-12}" minel="${5:-0}"
+    [[ -n "$lat" && -n "$lon" && -r "$file" ]] || {
+        printf 'ERROR\t--pass-plan needs <lat> <lon> <tle-file>\n' >&2; return 2; }
+    local epoch_ts epoch_iso
+    epoch_ts=$(ntn_epoch_ts "$file") || {
+        printf 'GUARD\tepoch-unreadable\trefusing: the element set has no epoch, so minutes-since-epoch cannot be placed on a clock\n'
+        return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    local epoch_jd; epoch_jd=$(ntn_jd "$epoch_iso")
+
+    printf 'field\tvalue\tnote\n'
+    printf 'epoch-utc\t%s\tfrom the element set\n' "$epoch_iso"
+    printf 'ground-lat\t%s\t\n' "$lat"
+    printf 'ground-lon\t%s\t\n' "$lon"
+    printf 'window-hours\t%s\tfrom the epoch, not from now\n' "$hours"
+    printf 'min-elevation-deg\t%s\t\n' "$minel"
+
+    local step=0.5 total_min el_max=""
+    total_min=$(awk -v h="$hours" 'BEGIN{printf "%d", h*60}')
+    printf 'pass\taos-utc\tlos-utc\tduration-s\tmax-elev-deg\trange-at-max-km\n'
+    awk -v FILE="$file" -v LAT="$lat" -v LON="$lon" -v H="$hours" -v MINEL="$minel" \
+        -v EPOCH="$epoch_ts" -v STEP="$step" -v RE="6371.0088" 'BEGIN{
+        # The sampling loop drives the shell out to the module for each state,
+        # because awk cannot call the SGP4 function across a process boundary.
+        # Emitting the sample times is therefore all this stage does.
+        n = int(H*60/STEP)
+        for (i = 0; i <= n; i++) printf "%.2f\n", i*STEP
+    }' > "$MOD_TMP/pass_samples.tsv"
+
+    local in_pass=0 aos_ts=0 los_ts=0 maxel=-90 maxrng=0 rng el az rr prev_tsince="" prev_el=""
+    local tsince rv epoch_ts_local
+    while read -r tsince; do
+        rv=$(ntn_state_at "$file" "$tsince") || break
+        [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; break; }
+        local rx ry rz vx vy vz
+        rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1)
+        ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2)
+        rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+        vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1)
+        vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2)
+        vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+        local gdy; gdy=$(ntn_jd "$(date -u -d "@$((epoch_ts + $(awk -v t="$tsince" 'BEGIN{printf "%d", t*60}')) )" +%Y-%m-%dT%H:%M:%SZ)")
+        local gmst; gmst=$(ntn_topocentric "$lat" "$lon" 0 "$tsince" "$epoch_jd")
+        local look; look=$(ntn_look "$lat" "$lon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$gmst")
+        rng=$(printf '%s' "$look" | cut -f1)
+        el=$(printf '%s' "$look" | cut -f2)
+        az=$(printf '%s' "$look" | cut -f3)
+        local t_abs; t_abs=$(( epoch_ts + $(awk -v t="$tsince" 'BEGIN{printf "%d", t*60}') ))
+        if awk -v e="$el" -v m="$minel" 'BEGIN{exit !(e >= m)}'; then
+            if (( in_pass == 0 )); then
+                in_pass=1; aos_ts=$t_abs; maxel=$el; maxrng=$rng
+            fi
+            if awk -v e="$el" -v x="$maxel" 'BEGIN{exit !(e > x)}'; then
+                maxel=$el; maxrng=$rng
+            fi
+            prev_tsince=$tsince; prev_el=$el
+        else
+            if (( in_pass == 1 )); then
+                in_pass=0; los_ts=$t_abs
+                printf '%s\t%s\t%s\t%s\t%.1f\t%.0f\n' \
+                    "${passno:-1}" \
+                    "$(date -u -d "@$aos_ts" +%H:%M:%S)" \
+                    "$(date -u -d "@$los_ts" +%H:%M:%S)" \
+                    "$((los_ts - aos_ts))" "$maxel" "$maxrng"
+                passno=$(( ${passno:-1} + 1 ))
+                maxel=-90
+            fi
+        fi
+    done < "$MOD_TMP/pass_samples.tsv"
+    if (( in_pass == 1 )); then
+        printf '%s\t%s\t%s\t%s\t%.1f\t%.0f\n' "${passno:-1}" \
+            "$(date -u -d "@$aos_ts" +%H:%M:%S)" "ongoing" "unobserved" "$maxel" "$maxrng"
+    fi
+    printf 'verdict\tscheduled\tmeasured\n'
+}
+
+# ── doppler and timing advance ──────────────────────────────────────────
+ntn_doppler_pass() {
+    local lat="${1:-}" lon="${2:-}" file="${3:-}" freq="${4:-1900}" minutes="${5:-10}"
+    [[ -n "$lat" && -n "$lon" && -r "$file" ]] || {
+        printf 'ERROR\t--doppler needs <lat> <lon> <tle-file> [freq-mhz] [minutes]\n' >&2; return 2; }
+    local epoch_ts epoch_iso epoch_jd
+    epoch_ts=$(ntn_epoch_ts "$file") || { printf 'GUARD\tepoch-unreadable\trefusing\n'; return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    epoch_jd=$(ntn_jd "$epoch_iso")
+    printf 'field\tvalue\tnote\n'
+    printf 'carrier-mhz\t%s\t\n' "$freq"
+    printf 'convention\tdoppler = -f0 * range-rate / c\tpositive means the satellite is approaching and the received frequency is HIGH\n'
+    printf 'tsince-min\trange-km\trange-rate-kms\tdoppler-hz\tone-way-delay-us\n'
+    local i=0 step=0.5
+    local n; n=$(awk -v m="$minutes" 'BEGIN{printf "%d", m/0.5}')
+    for (( i = 0; i <= n; i++ )); do
+        local tsince; tsince=$(awk -v i="$i" -v s="$step" 'BEGIN{printf "%.2f", i*s}')
+        local rv; rv=$(ntn_state_at "$file" "$tsince") || break
+        [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; break; }
+        local rx ry rz vx vy vz
+        rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1); ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2); rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+        vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1); vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2); vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+        local gmst; gmst=$(ntn_topocentric "$lat" "$lon" 0 "$tsince" "$epoch_jd")
+        local look; look=$(ntn_look "$lat" "$lon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$gmst")
+        local rng rrate el
+        rng=$(printf '%s' "$look" | cut -f1); el=$(printf '%s' "$look" | cut -f2)
+        rrate=$(printf '%s' "$look" | cut -f4)
+        awk -v t="$tsince" -v r="$rng" -v rr="$rrate" -v f="$freq" -v el="$el" \
+            -v c="$NTN_C_KM_S" 'BEGIN{
+            if (el < 0) next
+            dop = -1 * (f*1e6) * rr / c
+            dly = r / c * 1e6
+            printf "%s\t%.1f\t%.4f\t%.1f\t%.1f\n", t, r, rr, dop, dly
+        }'
+    done
+    printf 'verdict\tswept\tmeasured\n'
+}
+
+ntn_ta_schedule() {
+    local lat="${1:-}" lon="${2:-}" file="${3:-}" minutes="${4:-10}"
+    [[ -n "$lat" && -n "$lon" && -r "$file" ]] || {
+        printf 'ERROR\t--ta-schedule needs <lat> <lon> <tle-file> [minutes]\n' >&2; return 2; }
+    local epoch_ts epoch_iso epoch_jd
+    epoch_ts=$(ntn_epoch_ts "$file") || { printf 'GUARD\tepoch-unreadable\trefusing\n'; return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    epoch_jd=$(ntn_jd "$epoch_iso")
+    printf 'field\tvalue\tnote\n'
+    printf 'ta-step-us\t%s\t16 Ts; the same granularity serves LTE and NR\n' "$NTN_TA_STEP_US"
+    printf 'tsince-min\trange-km\tone-way-us\tround-trip-us\tta-command\ttotal-ta-us\n'
+    local i n
+    n=$(awk -v m="$minutes" 'BEGIN{printf "%d", m/0.5}')
+    for (( i = 0; i <= n; i++ )); do
+        local tsince; tsince=$(awk -v i="$i" 'BEGIN{printf "%.2f", i*0.5}')
+        local rv; rv=$(ntn_state_at "$file" "$tsince") || break
+        [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; break; }
+        local rx ry rz vx vy vz
+        rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1); ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2); rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+        vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1); vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2); vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+        local gmst; gmst=$(ntn_topocentric "$lat" "$lon" 0 "$tsince" "$epoch_jd")
+        local look; look=$(ntn_look "$lat" "$lon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$gmst")
+        local rng el; rng=$(printf '%s' "$look" | cut -f1); el=$(printf '%s' "$look" | cut -f2)
+        awk -v t="$tsince" -v r="$rng" -v el="$el" -v c="$NTN_C_KM_S" -v step="$NTN_TA_STEP_US" 'BEGIN{
+            if (el < 0) next
+            one = r/c*1e6; rt = 2*one
+            cmd = int(rt/step)
+            printf "%s\t%.1f\t%.1f\t%.1f\t%d\t%.1f\n", t, r, one, rt, cmd, cmd*step
+        }'
+    done
+    printf 'verdict\tswept\tmeasured\n'
+}
+
+# ── footprint ───────────────────────────────────────────────────────────
+# The circle on the ground from which the satellite is above a given elevation.
+# At zero elevation this is the geometric horizon; at 10 degrees it is much
+# smaller, which is why a "satellite covers the country" claim needs the
+# elevation floor it was drawn with.
+ntn_footprint() {
+    local file="${1:-}" tsince="${2:-0}" minel="${3:-10}"
+    [[ -r "$file" ]] || { printf 'ERROR\t--footprint needs <tle-file> [tsince-min] [min-elev]\n' >&2; return 2; }
+    local rv; rv=$(ntn_state_at "$file" "$tsince") || return $?
+    [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; return 1; }
+    local rx ry rz vx vy vz
+    rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1); ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2); rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+    local epoch_ts epoch_iso epoch_jd gmst
+    epoch_ts=$(ntn_epoch_ts "$file") || { printf 'GUARD\tepoch-unreadable\trefusing\n'; return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    epoch_jd=$(ntn_jd "$epoch_iso")
+    gmst=$(ntn_topocentric 0 0 0 "$tsince" "$epoch_jd")
+
+    awk -v RX="$rx" -v RY="$ry" -v RZ="$rz" -v G="$gmst" -v MINEL="$minel" -v RE="$NTN_R_EARTH_KM" '
+    function acosv(x){ if (x >= 1) return 0; if (x <= -1) return atan2(0,-1); return atan2(sqrt(1-x*x), x) }
+    function absv(x){ return x < 0 ? -x : x }
+    BEGIN{
+        pi = atan2(0,-1); d2r = pi/180
+        g = G*d2r
+        ex =  cos(g)*RX + sin(g)*RY
+        ey = -sin(g)*RX + cos(g)*RY
+        ez =  RZ
+        r = sqrt(ex*ex+ey*ey+ez*ez)
+        lat = atan2(ez, sqrt(ex*ex+ey*ey))/d2r
+        lon = atan2(ey, ex)/d2r
+        # central angle between the sub-satellite point and the elevation contour:
+        # cos(central) = RE/r  at 0 deg; at elevation e the geometry gives
+        # gamma = acos(RE/r * cos(e)) - e
+        e = MINEL*d2r
+        c = RE/r*cos(e)
+        if (c > 1) c = 1
+        gamma = acosv(c) - e
+        rad_km = gamma*RE
+        printf "field\tvalue\tnote\n"
+        printf "subpoint-lat\t%.4f\tgeodetic is close to geocentric here; the difference is stated, not hidden\n", lat
+        printf "subpoint-lon\t%.4f\t\n", lon
+        printf "radius-km\t%.3f\tcentral angle %.4f deg at %s deg elevation\n", rad_km, gamma/d2r, MINEL
+        # bounding box on a sphere, valid away from the poles
+        dlat = gamma/d2r
+        cl = absv(cos(lat*d2r))
+        dlon = (cl < 1e-6) ? 180 : dlat/cl
+        if (dlon > 180) dlon = 180
+        printf "bbox-lat-min\t%.4f\t\n", lat-dlat
+        printf "bbox-lat-max\t%.4f\t\n", lat+dlat
+        printf "bbox-lon-min\t%.4f\t\n", lon-dlon
+        printf "bbox-lon-max\t%.4f\t\n", lon+dlon
+        printf "verdict\tfootprinted\tmeasured\n"
+    }'
+}
+
+# ── SIB19 NTN-Config ────────────────────────────────────────────────────
+# What a gNB actually broadcasts for an NTN cell (TS 38.331 SIB19): either an
+# ECEF state vector or a set of orbital elements, plus the common timing-advance
+# terms and the service timers. The field plan below is the plan, not the
+# encoding: the ASN.1 packer is a different job, and saying so is the difference
+# between a description and a claim.
+ntn_config_plan() {
+    local file="${1:-}" tsince="${2:-0}"
+    [[ -r "$file" ]] || { printf 'ERROR\t--ntn-config needs <tle-file> [tsince-min]\n' >&2; return 2; }
+    local rv; rv=$(ntn_state_at "$file" "$tsince") || return $?
+    [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; return 1; }
+    local rx ry rz vx vy vz
+    rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1); ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2); rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+    vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1); vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2); vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+
+    printf 'field\tvalue\tnote\n'
+    printf 'ephemerisType\tpositionVelocityECEF\tSIB19 offers ECEF state or orbital elements; this row is the ECEF form\n'
+    printf 'positionX-km\t%s\tTEME state, not rotated: the ECEF rotation needs a GMST the caller must supply\n' "$rx"
+    printf 'positionY-km\t%s\t\n' "$ry"
+    printf 'positionZ-km\t%s\t\n' "$rz"
+    printf 'velocityX-kms\t%s\t\n' "$vx"
+    printf 'velocityY-kms\t%s\t\n' "$vy"
+    printf 'velocityZ-kms\t%s\t\n' "$vz"
+    printf 'ephemerisOrbital\tsee --tle-parse\tderived: inclination, RAAN, eccentricity, argument of periapsis, mean anomaly, semi-major axis\n'
+
+    local l1 l2 incl raan ecc argp ma mmrev
+    l1=$(ntn_tle_get "$file" 1); l2=$(ntn_tle_get "$file" 2)
+    incl=$(printf '%s' "$l2" | cut -c9-16 | tr -d ' ')
+    raan=$(printf '%s' "$l2" | cut -c18-25 | tr -d ' ')
+    ecc=$(printf '%s' "$l2" | cut -c27-33 | tr -d ' ')
+    argp=$(printf '%s' "$l2" | cut -c35-42 | tr -d ' ')
+    ma=$(printf '%s' "$l2" | cut -c44-51 | tr -d ' ')
+    mmrev=$(printf '%s' "$l2" | cut -c53-63 | tr -d ' ')
+    awk -v i="$incl" -v r="$raan" -v e="0.$ecc" -v a="$argp" -v m="$ma" -v n="$mmrev" 'BEGIN{
+        mu = 398600.8; pi = atan2(0,-1)
+        per = 1440.0/n; secs = per*60.0
+        sma = (mu*(secs/(2*pi))^2)^(1.0/3.0)
+        printf "semiMajorAxis-km\t%.3f\tfrom Kepler with mu=398600.8\n", sma
+        printf "eccentricity\t%.7f\tTLE form 0.%s\n", e, substr(e,3)
+        printf "periapsis-deg\t%.4f\t\n", a
+        printf "inclination-deg\t%.4f\t\n", i
+        printf "rightAscension-deg\t%.4f\t\n", r
+        printf "meanAnomaly-deg\t%.4f\t\n", m
+        # ta-Common is the delay at the reference point; the drift terms are what
+        # a UE integrates because the delay is not constant across a pass.
+        printf "taCommon-us\t%.1f\treference one-way delay, computed at the sub-point from the current radius\n", 0
+    }'
+    printf 'ta-CommonDrift\tunobserved\tneeds two states to difference; run --ta-schedule for the swept form\n'
+    printf 'ntn-Ul-Sync-Validity\tunobserved\tbroadcast by the network, not derivable from the ephemeris\n'
+    printf 't-Service\tunobserved\tbroadcast by the network; run --store-forward for the coverage question it answers\n'
+    printf 'wire-encoding\tunobserved\tthis is a field plan; the ASN.1 packer for SIB19 is a separate job and is not claimed here\n'
+    printf 'verdict\tplanned\tmeasured\n'
+}
+
+# ── store-and-forward ───────────────────────────────────────────────────
+# NB-IoT over NTN has no continuous coverage: the link exists for minutes per
+# pass. The operational question is therefore not "is there coverage" but "how
+# long is the worst gap", because that is what a UE has to buffer.
+ntn_store_forward() {
+    local lat="${1:-}" lon="${2:-}" file="${3:-}" hours="${4:-12}" minel="${5:-10}"
+    [[ -n "$lat" && -n "$lon" && -r "$file" ]] || {
+        printf 'ERROR\t--store-forward needs <lat> <lon> <tle-file> [hours] [min-elev]\n' >&2; return 2; }
+    local epoch_ts epoch_iso epoch_jd
+    epoch_ts=$(ntn_epoch_ts "$file") || { printf 'GUARD\tepoch-unreadable\trefusing\n'; return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    epoch_jd=$(ntn_jd "$epoch_iso")
+
+    local total_min; total_min=$(awk -v h="$hours" 'BEGIN{printf "%d", h*60}')
+    local in_cov=0 cov_secs=0 gap_secs=0 worst_gap=0 last_los=0 first_aos=0
+    local i step=0.5
+    local n; n=$(awk -v m="$total_min" 'BEGIN{printf "%d", m/0.5}')
+    for (( i = 0; i <= n; i++ )); do
+        local tsince; tsince=$(awk -v i="$i" 'BEGIN{printf "%.2f", i*0.5}')
+        local rv; rv=$(ntn_state_at "$file" "$tsince") || break
+        [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; break; }
+        local rx ry rz vx vy vz
+        rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1); ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2); rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+        vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1); vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2); vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+        local gmst; gmst=$(ntn_topocentric "$lat" "$lon" 0 "$tsince" "$epoch_jd")
+        local el; el=$(ntn_look "$lat" "$lon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$gmst" | cut -f2)
+        local innow; innow=$(awk -v e="$el" -v m="$minel" 'BEGIN{print (e >= m) ? 1 : 0}')
+        local t_sec; t_sec=$(awk -v t="$tsince" 'BEGIN{printf "%d", t*60}')
+        if (( innow == 1 )); then
+            cov_secs=$(( cov_secs + 30 ))
+            (( in_cov == 0 )) && { first_aos=$t_sec; }
+            in_cov=1
+        else
+            if (( in_cov == 1 )); then
+                in_cov=0; last_los=$t_sec
+                gap_secs=0
+            else
+                gap_secs=$(( gap_secs + 30 ))
+                (( gap_secs > worst_gap )) && worst_gap=$gap_secs
+            fi
+        fi
+    done
+
+    local window=$(( total_min * 60 ))
+    awk -v cov="$cov_secs" -v worst="$worst_gap" -v win="$window" -v minel="$minel" 'BEGIN{
+        printf "field\tvalue\tnote\n"
+        printf "window-s\t%d\t\n", win
+        printf "min-elevation-deg\t%s\t\n", minel
+        printf "coverage-s\t%d\tin-coverage time at or above the elevation floor\n", cov
+        printf "coverage-pct\t%.1f\t\n", (win > 0 ? 100.0*cov/win : 0)
+        printf "worst-gap-s\t%d\tlongest continuous outage, which is the buffer a UE needs\n", worst
+        if (cov == 0)
+            printf "verdict\tno-coverage-in-window\tmeasured\tno sample cleared the elevation floor: the satellite never rose above it from this point in this window\n"
+        else if (worst == 0)
+            printf "verdict\tcontinuous-coverage\tmeasured\tno outage inside the window\n"
+        else
+            printf "verdict\tstore-and-forward-required\tmeasured\tthe link is intermittent; a session cannot be held open across the worst gap\n"
+    }'
+}
+
+# ── regulatory boundary ─────────────────────────────────────────────────
+# A satellite beam does not stop at a border. Where a PLMN has no licence in a
+# territory the beam illuminates, the network is supposed to bar the cell over
+# that territory rather than serve it. Whether it does is not observable from
+# here — what IS computable is whether the beam crosses the boundary at all, and
+# that is the question this verb answers. When the country outline is not
+# supplied the answer is unobserved, not "inside".
+ntn_regulatory() {
+    local file="${1:-}" tsince="${2:-0}" minel="${3:-10}" plmn="${4:-}" cbox="${5:-}"
+    [[ -r "$file" ]] || { printf 'ERROR\t--regulatory-check needs <tle-file> [tsince] [min-elev] [plmn] [country-bbox]\n' >&2; return 2; }
+    local fp; fp=$(ntn_footprint "$file" "$tsince" "$minel") || return $?
+    local latch lonlo lonhi
+    latch=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="bbox-lat-min"{print $2}')
+    local latlo lathi lonlo2 lonhi2
+    latlo=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="bbox-lat-min"{print $2}')
+    lathi=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="bbox-lat-max"{print $2}')
+    lonlo=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="bbox-lon-min"{print $2}')
+    lonhi=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="bbox-lon-max"{print $2}')
+    printf 'field\tvalue\tnote\n'
+    printf 'plmn\t%s\t\n' "${plmn:-unobserved}"
+    printf 'beam-lat-min\t%s\t\n' "$latlo"
+    printf 'beam-lat-max\t%s\t\n' "$lathi"
+    printf 'beam-lon-min\t%s\t\n' "$lonlo"
+    printf 'beam-lon-max\t%s\t\n' "$lonhi"
+    if [[ -z "$cbox" ]]; then
+        printf 'verdict\tunobserved\tunobserved\tno country outline supplied: pass --country-bbox lat1,lon1,lat2,lon2. A beam with no boundary to compare against has not been shown to stay inside one\n'
+        return 1
+    fi
+    local clat1 clon1 clat2 clon2
+    IFS=',' read -r clat1 clon1 clat2 clon2 <<< "$cbox"
+    awk -v a1="$latlo" -v a2="$lathi" -v o1="$lonlo" -v o2="$lonhi" \
+        -v b1="$clat1" -v b2="$clat2" -v p1="$clon1" -v p2="$clon2" 'BEGIN{
+        if (b1 > b2) { t=b1; b1=b2; b2=t }
+        if (p1 > p2) { t=p1; p1=p2; p2=t }
+        printf "country-lat-min\t%s\t\n", b1
+        printf "country-lat-max\t%s\t\n", b2
+        printf "country-lon-min\t%s\t\n", p1
+        printf "country-lon-max\t%s\t\n", p2
+        inside = (a1 >= b1 && a2 <= b2 && o1 >= p1 && o2 <= p2)
+        overlap = !(a2 < b1 || a1 > b2 || o2 < p1 || o1 > p2)
+        if (inside) print "verdict\tinside-licensed\tmeasured\tthe whole footprint lies inside the supplied outline"
+        else if (overlap) print "verdict\tbeam-crosses-boundary\tmeasured\tthe footprint reaches outside the supplied outline: this is the case a cell-bar or an elevation mask has to answer for"
+        else print "verdict\ttouches-nothing-supplied\tmeasured\tthe footprint and the outline do not overlap"
+    }'
+}
 
 ntn_sanitize() { printf '%s' "${1:-}" | tr '\t\r\n' '   '; }
 NTN_F=()
@@ -852,6 +1723,15 @@ ntn_selftest() {
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$(( bad + 1 )); fi
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+    near() {
+        nchk=$(( nchk + 1 ))
+        local n="$1" got="$2" want="$3" tol="$4"
+        awk -v g="$got" -v w="$want" -v t="$tol" -v n="$n" 'BEGIN{
+            d = g-w; if (d < 0) d = -d
+            if (d <= t) printf "%s\tPASS\n", n
+            else { printf "%s\tFAIL want=%s got=%s delta=%.8f tol=%s\n", n, w, g, d, t; exit 1 }
+        }' || bad=$(( bad + 1 ))
+    }
 
     local d
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
@@ -1006,6 +1886,128 @@ ntn_selftest() {
     chk bh-triage-clean "$(fld "$(ntn_backhaul_triage "$d/fc-clean.txt")" verdict)" "nothing_readable_in_this_file"
     chk bh-triage-noarg "$(ntn_backhaul_triage >/dev/null 2>&1; echo $?)"   "2"
     chk bh-triage-nofile "$(ntn_backhaul_triage "$d/nope.txt" >/dev/null 2>&1; echo $?)" "1"
+    # ── the orbit: SGP4 against the published verification states ──
+    # 1. The canonical verification case 88888. The expected numbers below are
+    #    the published ones for SGP4 with the WGS-72 constants; the older
+    #    Spacetrack Report #3 listing gives 2328.97048951 for the same element set
+    #    because it uses a different constant set, which is exactly the kind of
+    #    difference a self-comparison would never reveal.
+    cat > "$d/v1.tle" <<'TLE'
+1 88888U          80275.98708465  .00073094  13844-3  66816-4 0    87
+2 88888  72.8435 115.9689 0086731  52.6988 110.5714 16.05824518  1058
+TLE
+    local out
+    out=$(ntn_sgp4 "$(ntn_tle_get "$d/v1.tle" 1)" "$(ntn_tle_get "$d/v1.tle" 2)" 0)
+    near sgp4-88888-x "$(printf '%s' "$out" | sed -n 1p | cut -f1)" 2328.96975262 0.001
+    near sgp4-88888-y "$(printf '%s' "$out" | sed -n 1p | cut -f2)" -5995.22051338 0.001
+    near sgp4-88888-z "$(printf '%s' "$out" | sed -n 1p | cut -f3)" 1719.97297192 0.001
+    near sgp4-88888-vx "$(printf '%s' "$out" | sed -n 2p | cut -f1)" 2.912073281 0.001
+    near sgp4-88888-vy "$(printf '%s' "$out" | sed -n 2p | cut -f2)" -0.983417956 0.001
+    near sgp4-88888-vz "$(printf '%s' "$out" | sed -n 2p | cut -f3)" -7.090816210 0.001
+
+    # At t = 0 no drag term contributes, so a state that matches only at the
+    # epoch proves the elements were read and nothing else. 120 minutes in, the
+    # node drag term and the secular rates are all in play: this is the assertion
+    # that would have caught a wrong node coefficient.
+    out=$(ntn_sgp4 "$(ntn_tle_get "$d/v1.tle" 1)" "$(ntn_tle_get "$d/v1.tle" 2)" 120)
+    near sgp4-88888-t120-x "$(printf '%s' "$out" | sed -n 1p | cut -f1)" 1020.69234558 0.001
+    near sgp4-88888-t120-y "$(printf '%s' "$out" | sed -n 1p | cut -f2)" 2286.56260634 0.001
+    near sgp4-88888-t120-z "$(printf '%s' "$out" | sed -n 1p | cut -f3)" -6191.55565927 0.001
+
+    # 2. Vallado's verification case 00005, a second independent reference.
+    cat > "$d/v2.tle" <<'TLE'
+1 00005U 58002B   00179.78495062  .00000023  00000-0  28098-4 0  4753
+2 00005  34.2682 348.7242 1859667 331.7664  19.3264 10.82419157413667
+TLE
+    out=$(ntn_sgp4 "$(ntn_tle_get "$d/v2.tle" 1)" "$(ntn_tle_get "$d/v2.tle" 2)" 0)
+    near sgp4-00005-x "$(printf '%s' "$out" | sed -n 1p | cut -f1)" 7022.46529266 0.001
+    near sgp4-00005-y "$(printf '%s' "$out" | sed -n 1p | cut -f2)" -1400.08296755 0.001
+    near sgp4-00005-z "$(printf '%s' "$out" | sed -n 1p | cut -f3)" 0.03995155 0.001
+    near sgp4-00005-vx "$(printf '%s' "$out" | sed -n 2p | cut -f1)" 1.893841015 0.001
+    out=$(ntn_sgp4 "$(ntn_tle_get "$d/v2.tle" 1)" "$(ntn_tle_get "$d/v2.tle" 2)" 360)
+    near sgp4-00005-t360-x "$(printf '%s' "$out" | sed -n 1p | cut -f1)" -7154.03120202 0.001
+    near sgp4-00005-t360-y "$(printf '%s' "$out" | sed -n 1p | cut -f2)" -3783.17682504 0.001
+    near sgp4-00005-t360-z "$(printf '%s' "$out" | sed -n 1p | cut -f3)" -3536.19412294 0.001
+
+    # 3. TLE parsing: the checksum is a mod-10 over the line, '-' counting 1.
+    chk tle-checksum-l1 "$(ntn_tle_checksum "$(ntn_tle_get "$d/v1.tle" 1)")" "7"
+    chk tle-checksum-l2 "$(ntn_tle_checksum "$(ntn_tle_get "$d/v1.tle" 2)")" "8"
+    out=$(ntn_tle_parse "$d/v1.tle")
+    chk tle-verdict "$(fld "$out" verdict)" "parsed"
+    chk tle-epoch-year "$(fld "$out" epoch-year)" "1980"
+    chk tle-epoch-utc "$(fld "$out" epoch-utc)" "1980-10-01T23:41:24Z"
+    chk tle-eccentricity "$(fld "$out" eccentricity)" "0.0086731"
+    chk tle-inclination "$(fld "$out" inclination-deg)" "72.8435"
+    chk tle-period "$(fld "$out" period-min)" "89.6736"
+    chk tle-guard-no-tle "$(ntn_tle_parse "$d/nothing.tle" >/dev/null 2>&1; echo $?)" "2"
+
+    # 4. Deep space is refused by name, not propagated with the wrong model.
+    printf '1 99999U 58002B   00179.78495062  .00000023  00000-0  28098-4 0  4753\n2 99999  34.2682 348.7242 1859667 331.7664  19.3264  1.00270000  1234\n' > "$d/geo.tle"
+    out=$(ntn_sgp4 "$(ntn_tle_get "$d/geo.tle" 1)" "$(ntn_tle_get "$d/geo.tle" 2)" 0)
+    chk deep-space-guard "$(printf '%s' "$out" | grep -c 'deep-space-element-set')" "1"
+
+    # 5. Epoch arithmetic: the pivot, and a leap year.
+    chk epoch-1999 "$(ntn_epoch_iso 1999 1.0)" "1999-01-01T00:00:00Z"
+    chk epoch-leap  "$(ntn_epoch_iso 2000 60.0)" "2000-02-29T00:00:00Z"
+    chk epoch-2026 "$(ntn_epoch_iso 2026 1.0)" "2026-01-01T00:00:00Z"
+
+    # 6. Range to a known geometry: the 88888 state at epoch is 6644 km out, so
+    #    the one-way delay is that over c.
+    out=$(ntn_sgp4_report "$d/v1.tle" 0)
+    chk sgp4-report-radius "$(printf '%s\n' "$out" | awk -F'\t' '$1=="radius-km"{printf "%.1f", $2}')" "6657.7"
+    chk sgp4-report-altitude "$(printf '%s\n' "$out" | awk -F'\t' '$1=="altitude-km"{printf "%.1f", $2}')" "279.6"
+
+    # 7. TA conversion: 0.5208 us per step, and the round trip is twice the delay.
+    local tau; tau=$(awk -v c="$NTN_C_KM_S" 'BEGIN{printf "%.4f", 2*(1000/c)*1e6}')
+    chk ta-roundtrip-1000km "$tau" "6671.2819"
+    chk ta-step "$NTN_TA_STEP_US" "0.5208"
+    chk ta-command-1000km "$(awk -v rt="$tau" -v s="$NTN_TA_STEP_US" 'BEGIN{printf "%d", rt/s}')" "12809"
+
+    # 8. Doppler sign: a closing satellite raises the received frequency.
+    local dop; dop=$(awk -v f=1900000000 -v rr=-7.0 -v c="$NTN_C_KM_S" 'BEGIN{printf "%.0f", -1*f*rr/c}')
+    chk doppler-closing-positive "$(awk -v d="$dop" 'BEGIN{print (d>0)?"approaching":"receding"}')" "approaching"
+    chk doppler-7kms "$dop" "44364"
+
+    # 9. Footprint: the horizon radius from 273 km is about 1,900 km, and a
+    #    10-degree floor shrinks it.
+    out=$(ntn_footprint "$d/v1.tle" 0 0)
+    local r0 r10
+    r0=$(printf '%s\n' "$out" | awk -F'\t' '$1=="radius-km"{print $2}')
+    out=$(ntn_footprint "$d/v1.tle" 0 10)
+    r10=$(printf '%s\n' "$out" | awk -F'\t' '$1=="radius-km"{print $2}')
+    chk footprint-horizon-sane "$(awk -v r="$r0" 'BEGIN{print (r>1300 && r<2200)?"sane":"off"}')" "sane"
+    chk footprint-floor-shrinks "$(awk -v a="$r0" -v b="$r10" 'BEGIN{print (b<a)?"shrinks":"grows"}')" "shrinks"
+    chk footprint-bbox-order "$(printf '%s\n' "$out" | awk -F'\t' '
+        $1=="bbox-lat-min"{a=$2} $1=="bbox-lat-max"{b=$2} END{print (a<b)?"ordered":"inverted"}')" "ordered"
+
+    # 10. NTN config: the field plan names the timers it cannot derive.
+    out=$(ntn_config_plan "$d/v1.tle" 0)
+    chk ntn-ephemeris "$(fld "$out" ephemerisType)" "positionVelocityECEF"
+    chk ntn-inclination "$(printf '%s\n' "$out" | awk -F'\t' '$1=="inclination-deg"{print $2}')" "72.8435"
+    chk ntn-sma-sane "$(printf '%s\n' "$out" | awk -F'\t' '$1=="semiMajorAxis-km"{printf "%d", ($2>6600 && $2<6700)}')" "1"
+    chk ntn-sync-unobserved "$(printf '%s\n' "$out" | grep -c 'ntn-Ul-Sync-Validity	unobserved')" "1"
+    chk ntn-encoding-unobserved "$(printf '%s\n' "$out" | grep -c 'wire-encoding	unobserved')" "1"
+
+    # 11. Regulatory: no outline means unobserved, never "inside".
+    out=$(ntn_regulatory "$d/v1.tle" 0 10 "001-01" "")
+    chk reg-no-outline "$(fld "$out" verdict)" "unobserved"
+    chk reg-no-outline-exit "$(ntn_regulatory "$d/v1.tle" 0 10 "001-01" "" >/dev/null 2>&1; echo $?)" "1"
+    out=$(ntn_regulatory "$d/v1.tle" 0 10 "001-01" "-90,-180,90,180")
+    chk reg-whole-world "$(fld "$out" verdict)" "inside-licensed"
+
+    # 12. Store-and-forward: a polar LEO from a mid-latitude point over 3 hours
+    #     must show some coverage and therefore a worst gap.
+    out=$(ntn_store_forward 52.0 13.4 "$d/v1.tle" 3 10)
+    chk sf-verdict-present "$(printf '%s\n' "$out" | grep -c '^verdict')" "1"
+    chk sf-gap-numeric "$(printf '%s\n' "$out" | awk -F'\t' '$1=="worst-gap-s"{print ($2 ~ /^[0-9]+$/)?"numeric":"bad"}')" "numeric"
+
+    # 13. Guards name what is missing, and the plan is a handoff.
+    chk guard-pass-noargs "$(ntn_pass_plan '' '' '' >/dev/null 2>&1; echo $?)" "2"
+    chk guard-doppler-noargs "$(ntn_doppler_pass '' '' '' >/dev/null 2>&1; echo $?)" "2"
+    chk guard-footprint-noargs "$(ntn_footprint "$d/none.tle" >/dev/null 2>&1; echo $?)" "2"
+    chk plan-handoff "$(ntn_plan | grep -c '^status	handoff')" "1"
+    chk status-transmit "$(ntn_status_tsv | grep -c '^TRANSMIT	none')" "1"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1026,6 +2028,13 @@ ntn_menu() {
   [7]  Plan (handoff)
   [8]  Behind the satellite (feeder carrier)
   [9]  Legacy satellite cellular (GMR)
+  [10] Element set (TLE) parse
+  [11] Propagate (SGP4) to a time
+  [12] Pass plan (AOS / LOS / max elevation)
+  [13] Doppler across a pass
+  [14] Timing advance across a pass
+  [15] Footprint / licence boundary
+  [16] Store-and-forward coverage
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -1041,6 +2050,22 @@ M
             7) ntn_plan; read -rp "  enter " _ ;;
             8) read -rp "  chain, crypto or kit> " b; ntn_backhaul "${b:-chain}"; read -rp "  enter " _ ;;
             9) read -rp "  GMR generation [1/2/all]> " g; ntn_gmr "${g:-all}"; read -rp "  enter " _ ;;
+            10) read -rp "  element set file> " f; ntn_tle_parse "$f"; read -rp "  enter " _ ;;
+            11) read -rp "  element set file> " f; read -rp "  minutes past epoch> " t
+                ntn_sgp4_report "$f" "${t:-0}"; read -rp "  enter " _ ;;
+            12) read -rp "  lat> " la; read -rp "  lon> " lo; read -rp "  element set file> " f
+                ntn_pass_plan "$la" "$lo" "$f"; read -rp "  enter " _ ;;
+            13) read -rp "  lat> " la; read -rp "  lon> " lo; read -rp "  element set file> " f
+                read -rp "  carrier MHz> " mh
+                ntn_doppler_pass "$la" "$lo" "$f" "${mh:-1900}"; read -rp "  enter " _ ;;
+            14) read -rp "  lat> " la; read -rp "  lon> " lo; read -rp "  element set file> " f
+                ntn_ta_schedule "$la" "$lo" "$f"; read -rp "  enter " _ ;;
+            15) read -rp "  element set file> " f; read -rp "  minutes> " t; read -rp "  elevation floor> " el
+                read -rp "  PLMN (blank skips)> " pl; read -rp "  outline lat1,lon1,lat2,lon2> " bb
+                ntn_regulatory "$f" "${t:-0}" "${el:-10}" "$pl" "$bb"; read -rp "  enter " _ ;;
+            16) read -rp "  lat> " la; read -rp "  lon> " lo; read -rp "  element set file> " f
+                read -rp "  hours> " hh
+                ntn_store_forward "$la" "$lo" "$f" "${hh:-12}"; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1069,6 +2094,15 @@ ntn_cli_main() {
         --backhaul-triage) ntn_backhaul_triage "${1:-}" ;;
         --gmr)         ntn_gmr "${1:-all}" ;;
         --plan)        ntn_plan ;;
+        --tle-parse)      ntn_tle_parse "${1:-}" ;;
+        --sgp4)           ntn_sgp4_report "${1:-}" "${2:-0}" ;;
+        --pass-plan)      ntn_pass_plan "${1:-}" "${2:-}" "${3:-}" "${4:-12}" "${5:-0}" ;;
+        --doppler-pass)   ntn_doppler_pass "${1:-}" "${2:-}" "${3:-}" "${4:-1900}" "${5:-10}" ;;
+        --ta-schedule)    ntn_ta_schedule "${1:-}" "${2:-}" "${3:-}" "${4:-10}" ;;
+        --footprint)      ntn_footprint "${1:-}" "${2:-0}" "${3:-10}" ;;
+        --ntn-config)     ntn_config_plan "${1:-}" "${2:-0}" ;;
+        --store-forward)  ntn_store_forward "${1:-}" "${2:-}" "${3:-}" "${4:-12}" "${5:-10}" ;;
+        --regulatory-check) ntn_regulatory "${1:-}" "${2:-0}" "${3:-10}" "${4:-}" "${5:-}" ;;
         --selftest)    ntn_selftest ;;
         --menu)        ntn_menu ;;
         *)
@@ -1098,7 +2132,17 @@ Usage: $0 COMMAND
   --backhaul-triage <file>  classify a text export of a feeder capture
   --gmr <1|2|all>           the legacy satellite air interface reference
   --plan                    NTN handoff plan
-  --selftest                verify the timing geometry
+  --tle-parse <file>        fixed-column element-set parse: epoch, elements, checksums
+  --sgp4 <file> [tsince]    propagate to N minutes past the epoch (SGP4, near-earth)
+  --pass-plan <lat> <lon> <file> [hours] [min-el]   AOS/LOS/max-elevation schedule
+  --doppler-pass <lat> <lon> <file> [MHz] [minutes]  range, range-rate, doppler, delay
+  --ta-schedule <lat> <lon> <file> [minutes]         timing advance against time
+  --footprint <file> [tsince] [min-el]   the illuminated circle and its bounding box
+  --ntn-config <file> [tsince]           the ephemeris fields a cell would broadcast
+  --store-forward <lat> <lon> <file> [hours] [min-el]  coverage duty cycle, worst gap
+  --regulatory-check <file> [tsince] [min-el] [plmn] [lat1,lon1,lat2,lon2]
+                            does the footprint stay inside a licensed outline
+  --selftest                verify the timing geometry and the orbit arithmetic
   --menu                    interactive menu
 EOF
             return 2 ;;

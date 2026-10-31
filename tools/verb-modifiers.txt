@@ -9,6 +9,13 @@
 # One verb per line, without the leading dashes. Adding a line here means the
 # verb takes an argument everywhere in the tree -- tools/check-verbs.sh fails
 # if a verb listed here is dispatched as a bare command with no argument.
+to
+seid
+response
+from
+teid-to
+teid-from
+retries
 aanf
 action
 algo

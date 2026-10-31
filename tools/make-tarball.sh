@@ -72,6 +72,15 @@ if ! ( cd "$vdir" && ./tools/check-paths.sh >/dev/null 2>&1 ); then
     exit 1
 fi
 
+# The shortcuts are the first thing anyone types after extracting, and they are
+# resolved relative to the wrapper, so the wrapper is only proven inside a real
+# extraction. A `bin/` shim lost its executable bit once doing exactly this.
+if ! ( cd "$vdir" && ./tools/check-launchers.sh >/dev/null 2>&1 ); then
+    printf 'make-tarball: check-launchers failed inside the extracted tree\n' >&2
+    ( cd "$vdir" && ./tools/check-launchers.sh 2>&1 | tail -5 >&2 ) || true
+    exit 1
+fi
+
 # A module has to run from the extracted tree with nothing else from here.
 #
 # The output is captured BEFORE it is searched. Piping the module straight into

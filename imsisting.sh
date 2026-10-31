@@ -482,6 +482,15 @@ IMSISTING_MODULE_TABLE=(
     # INTERCEPT / CARRIER
     "INTERCEPT / CARRIER|63|LI Interception|lipr_menu|42_li_probe"
     "INTERCEPT / CARRIER|64|Carrier API Abuse|capi_menu|44_carrier_api"
+
+    # BASEBAND / DEVICE (continued: the modem's text protocol, appended
+    # last so the menu keys stay 01..N in table order — fn_for_key returns
+    # the first match on a key, so a row out of sequence is unreachable).
+    "BASEBAND / DEVICE|65|Modem AT Surface|at_menu|64_modem_at"
+
+    # CORE NETWORK (continued: the messaging plane above NAS, appended last for
+    # the reason above -- the key is the table position).
+    "CORE NETWORK|66|RCS Messaging|rcs_menu|65_rcs"
 )
 
 # ── banner ──────────────────────────────────────────────────

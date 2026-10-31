@@ -38,7 +38,7 @@ problem() {
 # documentation directory, and a gate that demands one would fail on a clean
 # checkout of the tree it is meant to check.
 for d in modules tools native native/src native/resources \
-         captures logs loot state tmp; do
+         captures logs loot state tmp bin; do
     if [[ -d "$ROOT/$d" ]]; then
         (( jsonout )) || printf 'OK    dir  %s\n' "$d"
     else
@@ -47,9 +47,10 @@ for d in modules tools native native/src native/resources \
 done
 
 # 2. The launcher and the tools.
-for f in imsisting.sh tools/gen-module-index.sh tools/run-selftests.sh \
+for f in imsisting.sh stinglab.sh bin/imsisting bin/imsisting-gui bin/imsisting-tui bin/stinglab \
+         tools/gen-module-index.sh tools/run-selftests.sh \
          tools/check-paths.sh tools/check-verbs.sh tools/check-gui-text.sh \
-         tools/check-gsm-si.sh; do
+         tools/check-gsm-si.sh tools/check-manual.sh tools/check-launchers.sh; do
     if [[ -x "$ROOT/$f" ]]; then
         (( jsonout )) || printf 'OK    exec %s\n' "$f"
     elif [[ -f "$ROOT/$f" ]]; then

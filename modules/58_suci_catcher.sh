@@ -1236,15 +1236,20 @@ sc_selftest() {
 
     # ── NAS builders ──
     # REGISTRATION REQUEST: 7E 00 41 | 01 (initial, follow-on clear) |
-    # 77 00 0A (5GS mobile identity, type 6, ten octets) | null-scheme SUCI.
+    # 77 <len> (5GS mobile identity, type 7 = SUCI, len = octets of the
+    # identity contents) | the SUCI itself.
     # The identity is the one 14_suci --build-suci 0 123456789 emits, asserted
-    # against that module rather than typed in by hand.
-    local suci_ref
+    # against that module rather than typed in by hand. The length octet is
+    # computed from what that module emits rather than written down here: the
+    # SUCI grew from ten octets to thirteen when 14_suci learned to name the
+    # home network (1.0.61), and a hard-coded 0A left this row red afterwards.
+    local suci_ref suci_len
     suci_ref=$(bash "$IMSISTING_ROOT/modules/14_suci.sh" --build-suci 0 123456789 2>/dev/null |
                awk -F'\t' '$1=="suci"{print toupper($2); exit}')
     [[ -n "$suci_ref" ]] || suci_ref=none
+    suci_len=$(printf '%02X' "$(( ${#suci_ref} / 2 ))")
     chk nas-registration-request "$(sc_registration_request "$suci_ref")" \
-        "7E00410177000A${suci_ref}"
+        "7E0041017700${suci_len}${suci_ref}"
     # IDENTITY REQUEST: 7E 00 5B | 01 (SUCI). This is the octet string
     # 32_nas_signaling --build-nas 5gs identity-request --identity suci emits,
     # asserted against the module that owns it rather than against a copy.

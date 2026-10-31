@@ -71,6 +71,19 @@ Or launch the built binary directly:
 ./native/builddir/imsisting-gui
 ```
 
+**Shortcuts.** The repository ships `bin/` wrappers so you can type `imsisting`,
+`imsisting-gui`, `imsisting-tui` without the full path. Add them to your `PATH`:
+
+```bash
+export PATH="$PWD/bin:$PATH"   # add to ~/.bashrc or ~/.profile
+imsisting --list                # works from any directory
+imsisting-gui                   # launch the GUI
+imsisting-tui                   # launch the TUI
+```
+
+If you have stinglab installed as a sibling toolkit, the same
+`bin/` directory provides `stinglab` as well.
+
 The GUI asks for your password per action via `pkexec`, not once at startup.
 
 ### Dependencies

@@ -81,17 +81,26 @@ gtpu_dec2hex() {  # <value> <octets>
     printf '%s' "$out"
 }
 
-# The GTP-U message types this module builds or names. 255 is the echo
-# request and 254 the echo response (TS 29.281 §7.1); everything else in the
-# list is a G-PDU carrying a payload (255 is the only control-shaped one here,
-# which is why an echo storm is the cheapest thing to do with a user plane).
+# The GTP-U message types this module builds or names (TS 29.281 §7.1, numbers
+# shared with TS 29.060 Tab 6.1-1).  The argument is the message-type octet as
+# TWO HEX DIGITS, because `case` matches patterns as text — a decimal `26)`
+# would never match the string "1A", which is how 26 once fell through to
+# `unknown`.
+#
+#   01 Echo Request        02 Echo Response       03 Version Not Supported
+#   1A Error Indication (26)  1F Supported Ext Headers Notification (31)
+#   FE End Marker (254)    FF G-PDU (255)
+#
+# Type 26 matters more than the rest: the T1 TEID oracle reads it.  A probe
+# whose success case is named `unknown` reports every live TEID as free.
 gtpu_msg_name() {
     case "${1:-}" in
         01) printf 'echo-request' ;;
         02) printf 'echo-response' ;;
-        03) printf 'error-indication' ;;
-        10) printf 'supported-extension-headers-notification' ;;
-        20) printf 'end-marker' ;;
+        03) printf 'version-not-supported' ;;
+        1A) printf 'error-indication' ;;
+        1F) printf 'supported-extension-headers-notification' ;;
+        FE) printf 'end-marker' ;;
         FF) printf 'G-PDU' ;;
         *)  printf 'unknown' ;;
     esac
@@ -119,6 +128,18 @@ Usage: gtpu COMMAND
   --inner-route <hex>            decode the inner IPv4 header and report where
                                  the tunnel is actually allowed to deliver
   --detect <pcap|hex>            find GTP-U anomalies in traffic or a capture
+  --boundary [hex]               an inner packet read as a crossing: which
+                                 control-plane service its destination reaches,
+                                 and whether the tunnel put it there
+  --teid-probe <ip> [opts]       ask a live peer which TEIDs it does not know:
+                                 the §7.3 Error Indication oracle (T1)
+      --teid <hex>               one TEID; --teid-from/--teid-to a range;
+      --count <n> [--seed <n>]   otherwise n random ones
+      --port 2152  --rate 8  --timeout 1.5  --retries 2  --no-echo
+  --bridge <svc> [addr] [opts]   Network Boundary Bridging: the inner packet
+                                 aimed at a control-plane service, read as a
+                                 crossing, wrapped in the G-PDU that carries it
+      --port <n>  --teid <hex>  --qfi <n>  --inner <hex>
   --paths                        the reference points and what each allows
   --plan <name>                  write a handoff plan for the parts that need
                                  a live peer (echo-storm|teid-collision|inject)
@@ -594,6 +615,80 @@ gtpu_addr_scope() {
     fi
 }
 
+# ── --boundary ──────────────────────────────────────────────────────────
+# The crossing the reference points above do not describe. A packet arrives on
+# N3 or N6 and the receiving node decapsulates it; if what comes out is
+# addressed at a service that terminates on that same node or on the management
+# network behind it, the tunnel carried its sender into a plane the subscription
+# was never granted. The TEID authenticated the outer packet. Nothing
+# authenticated the inner one, and it is the inner one that gets routed.
+gtpu_cmd_boundary() {
+    local hex="${1:-}"
+    if [ -z "$hex" ]; then
+        printf 'service\tl4\tport\treference_point\twhat_it_buys\n'
+        printf 'PFCP\tudp\t8805\tN4, SMF to UPF\tthe rule that decides where a subscriber\x27s packets go\n'
+        printf 'GTP-U\tudp\t2152\tN3, N9, S1-U\tthe user plane itself, so encapsulation inside encapsulation\n'
+        printf 'NGAP\tsctp\t38412\tN2, gNB to AMF\tregistration, paging, and who is on the cell\n'
+        printf 'GTP-C\tudp\t2123\tS11, S5/S8\tbearer creation, and every TEID in use\n'
+        printf 'Diameter\ttcp/sctp\t3868\tS6a, Gx, Gy\tsubscriber profiles and charging records\n'
+        printf 'SBI\ttcp\t80,443,8080\tN7,N8,N10,N11,N13,N22\tthe service layer as JSON over HTTP/2\n'
+        printf 'SIGTRAN\tsctp\t2905,132\tM3UA to an STP\tMAP, and every IMSI on the network\n'
+        return 0
+    fi
+
+    hex="${hex// /}"; hex="${hex//:/}"; hex="${hex//$'\n'/}"; hex="${hex^^}"
+    gtpu_is_hex "$hex" || { printf 'ERROR\tinner packet as hex\n' >&2; return 2; }
+    (( ${#hex} >= 40 )) || {
+        printf 'ERROR\t%d octets: an IPv4 header is at least 20\n' "$(( ${#hex} / 2 ))" >&2; return 2; }
+    local ver=$(( ( 16#${hex:0:2} >> 4 ) & 0xF ))
+    (( ver == 4 )) || { printf 'ERROR\tversion nibble %d: not IPv4\n' "$ver" >&2; return 2; }
+    local ihl=$(( 16#${hex:0:2} & 0xF )); ihl=$(( ihl * 4 ))
+    (( ihl >= 20 )) || { printf 'ERROR\tIHL %d: the header is at least 20 octets\n' "$ihl" >&2; return 2; }
+    (( ${#hex} >= ihl * 2 )) || {
+        printf 'ERROR\t%d octets: shorter than the header it declares\n' "$(( ${#hex} / 2 ))" >&2; return 2; }
+
+    local pt="${hex:18:2}" l4
+    case "$pt" in
+        11) l4=udp ;;  06) l4=tcp ;;  84) l4=sctp ;;
+        01) l4=icmp ;; 04) l4=ipip ;; 29) l4=ipv6 ;;
+        *)  l4="proto-$(( 16#$pt ))" ;;
+    esac
+    printf 'field\tvalue\n'
+    printf 'inner_ip\t%s\n' "$(gtpu_ipv4_summary "$hex")"
+    local dst="${hex:32:8}"
+    local d1=$(( 16#${dst:0:2} )) d2=$(( 16#${dst:2:2} ))
+    printf 'dst_scope\t%s\n' "$(gtpu_addr_scope "$d1" "$d2")"
+    printf 'l4\t%s\n' "$l4"
+
+    local dport="" sport=""
+    if [[ "$l4" == udp || "$l4" == tcp || "$l4" == sctp ]] && (( ${#hex} >= (ihl + 4) * 2 )); then
+        sport=$(( 16#${hex:$(( ihl * 2 )):4} ))
+        dport=$(( 16#${hex:$(( (ihl + 2) * 2 )):4} ))
+        printf 'sport\t%s\n' "$sport"
+        printf 'dport\t%s\n' "$dport"
+    else
+        printf 'dport\tnot-advertised\n'
+    fi
+
+    local service=none point="-" buys="nothing on a control plane" crosses=no
+    case "$l4:${dport:-none}" in
+        udp:8805)        service=PFCP     point="N4, SMF to UPF"        buys="the rule that decides where this subscriber's packets go" ;;
+        udp:2152)        service=GTP-U    point="N3, N9, S1-U"          buys="a further tunnel: the receiver decapsulates again" ;;
+        sctp:38412)      service=NGAP     point="N2, gNB to AMF"        buys="registration, paging, and who is on the cell" ;;
+        udp:2123)        service=GTP-C    point="S11, S5/S8"            buys="bearer creation, and every TEID in use" ;;
+        tcp:3868|sctp:3868) service=Diameter point="S6a, Gx, Gy"        buys="subscriber profiles and charging records" ;;
+        tcp:80|tcp:443|tcp:8080|tcp:9090) service="SBI candidate" point="N7-N22" buys="the service layer, as JSON over HTTP/2" ;;
+        sctp:2905|sctp:132) service=SIGTRAN point="M3UA to an STP"      buys="MAP, and every IMSI on the network" ;;
+    esac
+    [[ "$service" == none ]] || crosses=yes
+    printf 'service\t%s\n' "$service"
+    printf 'reference_point\t%s\n' "$point"
+    printf 'what_it_buys\t%s\n' "$buys"
+    printf 'crosses\t%s\n' "$crosses"
+
+    return 0
+}
+
 # ── --detect ────────────────────────────────────────────────────────────
 # The anomalies worth naming are the ones that do not need a capture parser:
 # a length field that disagrees with the packet, a TEID of zero on a G-PDU, an
@@ -658,6 +753,323 @@ gtpu_cmd_paths() {
     printf 'note\tevery point above trusts the TEID. None authenticates it; the security is the tunnel\x27s existence, not the packet\n'
     printf 'note\tN3 is the one that carries the PDU Session Container, so it is the one where QoS forgery lands (--build --qfi)\n'
     printf 'cross_ref\t11_lte_core builds the GTP-C that creates every tunnel named here\n'
+    return 0
+}
+
+# ── --teid-probe (T1, TEID-IP discovery) ────────────────────────────────
+#
+# The oracle: TS 29.281 §7.3 says a receiver that gets a G-PDU for a TEID it does
+# not know MAY answer with an Error Indication (type 26) naming that TEID. MAY.
+# So silence is ambiguous by construction, and the four verdicts below exist to
+# keep that ambiguity visible instead of resolving it in the flattering
+# direction:
+#
+#   error-indication  the node answered and named this TEID: it is not in use
+#   in-use            silence, and ONLY when the path answered an Echo and the
+#                     node proved it implements the oracle at all
+#   unobserved        silence with no calibration: not a claim about the TEID
+#   answered-other    something came back that is not an Error Indication
+#
+# `unobserved` is the common answer and it is a legitimate one. A node that
+# never emits Error Indication cannot be enumerated by this method, and calling
+# its whole range free is the failure mode this verb is built to refuse.
+#
+# Every G-PDU sent carries a zero-length payload, so a TEID collision (small but
+# nonzero: 2^32 against a busy peer's few hundred entries) delivers nothing.
+gtpu_cmd_teid_probe() {
+    local host="" port="2152" teid="" tfrom="" tto="" count="8" seed="0"
+    local tmo="1.5" rate="8" retries="2" noecho=0
+    while (( $# )); do
+        case "$1" in
+            --port)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--port takes a number\n' >&2; return 2; }
+                       port="$2"; shift 2 ;;
+            --teid)    (($# >= 2)) || { printf 'ERROR\t--teid takes 8 hex digits\n' >&2; return 2; }
+                       teid="$2"; shift 2 ;;
+            --teid-from) (($# >= 2)) || { printf 'ERROR\t--teid-from takes hex\n' >&2; return 2; }
+                       tfrom="$2"; shift 2 ;;
+            --teid-to) (($# >= 2)) || { printf 'ERROR\t--teid-to takes hex\n' >&2; return 2; }
+                       tto="$2"; shift 2 ;;
+            --count)   (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--count takes a number\n' >&2; return 2; }
+                       count="$2"; shift 2 ;;
+            --seed)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--seed takes a number\n' >&2; return 2; }
+                       seed="$2"; shift 2 ;;
+            --timeout) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                           printf 'ERROR\t--timeout takes seconds\n' >&2; return 2; }
+                       tmo="$2"; shift 2 ;;
+            --rate)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                           printf 'ERROR\t--rate takes probes per second\n' >&2; return 2; }
+                       rate="$2"; shift 2 ;;
+            --retries) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--retries takes a count\n' >&2; return 2; }
+                       retries="$2"; shift 2 ;;
+            --no-echo) noecho=1; shift ;;
+            --help|-h) printf 'usage: --teid-probe <ip> [--port 2152] [--teid HEX | --teid-from HEX --teid-to HEX | --count N [--seed N]] [--rate N] [--timeout SEC] [--retries N] [--no-echo]\n'; return 0 ;;
+            -*)        printf 'ERROR\t--teid-probe does not take %s\n' "$(gtpu_sanitize "$1")" >&2; return 2 ;;
+            *)         [[ -z "$host" ]] || {
+                           printf 'ERROR\t--teid-probe takes one address\n' >&2; return 2; }
+                       host="$1"; shift ;;
+        esac
+    done
+    [[ -n "$host" ]] || { printf 'ERROR\t--teid-probe needs an address\n' >&2; return 2; }
+    for v in "$teid" "$tfrom" "$tto"; do
+        [[ -z "$v" ]] || [[ "$v" =~ ^[0-9A-Fa-f]{1,8}$ ]] || {
+            printf 'ERROR\tTEIDs are 1-8 hex digits; got %s\n' "$(gtpu_sanitize "$v")" >&2; return 2; }
+    done
+
+    local tool="$IMSISTING_ROOT/tools/gtpu_probe.py"
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing: the wire half of this verb lives there\n' "$tool" >&2
+        return 1; }
+
+    local -a pargs=("$host" --port "$port" --timeout "$tmo" --rate "$rate" --retries "$retries")
+    [[ -n "$teid"  ]] && pargs+=(--teid "$teid")
+    [[ -n "$tfrom" ]] && pargs+=(--from "$tfrom")
+    [[ -n "$tto"   ]] && pargs+=(--to "$tto")
+    # A range or an explicit TEID means the caller chose the values; only ask for
+    # random ones when neither was given, so --count is not silently additive.
+    if [[ -z "$teid" && -z "$tfrom" && -z "$tto" ]]; then
+        pargs+=(--count "$count" --seed "$seed")
+    fi
+    (( noecho )) && pargs+=(--no-echo)
+
+    # Budget: a silent peer costs retries x timeout per TEID, and the echo check
+    # costs the same again twice. A run that overruns is reported, never truncated.
+    local budget=$(( (count + 2) * (retries + 1) * ${tmo%.*} + 120 ))
+    local raw prc
+    raw=$(timeout "$budget" python3 "$tool" "${pargs[@]}" 2>&1); prc=$?
+    if (( prc == 124 )); then
+        printf 'ERROR\tthe probe did not finish inside %ss (a silent peer costs retries x timeout per TEID)\n' "$budget" >&2
+        return 1
+    fi
+    if (( prc != 0 )); then
+        printf '%s\n' "$raw" >&2
+        printf 'ERROR\tthe probe refused or failed\n' >&2
+        return 1
+    fi
+
+    local echo_state="-" oracle="-" post_echo="-"
+    local line kind a b c
+    while IFS=$'\t' read -r kind a b c d; do
+        case "$kind" in
+            STATE)
+                case "$a" in
+                    echo)      echo_state="$b" ;;
+                    oracle)    oracle="$b" ;;
+                    post_echo) post_echo="$b" ;;
+                esac ;;
+        esac
+    done < <(printf '%s\n' "$raw")
+
+    printf 'field\tvalue\n'
+    printf 'peer\t%s\n' "$(gtpu_sanitize "$host")"
+    printf 'port\t%s\n' "$port"
+    printf 'echo_state\t%s\n' "$echo_state"
+    printf 'oracle\t%s\n' "$oracle"
+    printf 'post_echo\t%s\n' "$post_echo"
+    case "$echo_state" in
+        answered)
+            printf 'path\tGTP-U answered on this port: silence below is the node choosing not to answer, not a dropped datagram\n' ;;
+        silent|unreachable|send-error)
+            printf 'path\tGTP-U did not answer: every row below is unobserved, because nothing established that this port speaks at all\n' ;;
+        skipped)
+            printf 'path\tpath check skipped at the caller\x27s request: silence below cannot be classified\n' ;;
+    esac
+    case "$oracle" in
+        present)
+            printf 'method\tT1 applies: this node answers Error Indication, so silence means in-use\n' ;;
+        absent)
+            printf 'method\tT1 does not apply: this node never sent an Error Indication, so its silence carries no information and no TEID below is claimed in use\n' ;;
+        *)
+            printf 'method\tT1 cannot be assessed: the path check did not answer, so the oracle was never exercised\n' ;;
+    esac
+
+    printf 'teid\tverdict\trtt_ms\tdetail\n'
+    local n_ei=0 n_use=0 n_unobs=0 n_other=0 n_rows=0
+    local -a store=()
+    while IFS=$'\t' read -r kind a b c d; do
+        case "$kind" in
+            ROW)
+                n_rows=$(( n_rows + 1 ))
+                case "$b" in
+                    error-indication) n_ei=$(( n_ei + 1 )) ;;
+                    in-use)           n_use=$(( n_use + 1 )) ;;
+                    answered-other)   n_other=$(( n_other + 1 )) ;;
+                    *)                n_unobs=$(( n_unobs + 1 )) ;;
+                esac
+                printf '%s\t%s\t%s\t%s\n' "$a" "$b" "${c:--}" "${d:--}"
+                store+=("$a	$b	${c:--}	${d:--}") ;;
+        esac
+    done < <(printf '%s\n' "$raw")
+
+    printf 'probed\t%s\n' "$n_rows"
+    printf 'error_indication\t%s\n' "$n_ei"
+    printf 'in_use\t%s\n' "$n_use"
+    printf 'unobserved\t%s\n' "$n_unobs"
+    printf 'answered_other\t%s\n' "$n_other"
+
+    # The store is loot only when something was actually learned: a run that
+    # classified nothing is not an observation worth a row.
+    if (( n_rows > 0 )); then
+        local f="$GTPU_DIR/teid_probe.tsv"
+        if [[ ! -s "$f" ]]; then
+            printf 'utc\tpeer\tport\techo_state\toracle\tteid\tverdict\trtt_ms\tdetail\n' > "$f"
+        fi
+        local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        for line in "${store[@]}"; do
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$ts" "$(gtpu_sanitize "$host")" "$port" "$echo_state" "$oracle" "$line" >> "$f"
+        done
+        printf 'store\t%s\n' "$f"
+    fi
+    return 0
+}
+
+# ── --bridge (Network Boundary Bridging delivery) ───────────────────────
+#
+# NBB is not a new codec: it is --boundary (which control-plane service does an
+# inner packet reach) composed with --build (the GTP-U envelope that carries it).
+# This verb exists so the composition is one command instead of two, and so the
+# claim NBB actually makes is printed with it: the crossing is possible only
+# because egress filtering did not enforce the N3/N6 boundary.
+gtpu_cmd_bridge() {
+    local service="${1:-}" addr="${2:-}" port=""
+    local teid="00000000" qfi="" inner=""
+    # `shift 2` on a one-argument call shifts nothing and leaves the argument in
+    # place, so the loop below would then report it as an unknown option.
+    shift $(( $# < 2 ? $# : 2 ))
+    while (( $# )); do
+        case "$1" in
+            --port) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                        printf 'ERROR\t--port takes a number\n' >&2; return 2; }
+                    port="$2"; shift 2 ;;
+            --teid) (($# >= 2)) || { printf 'ERROR\t--teid takes hex\n' >&2; return 2; }
+                    teid="$2"; shift 2 ;;
+            --qfi)  (($# >= 2)) || { printf 'ERROR\t--qfi takes 0-63\n' >&2; return 2; }
+                    qfi="$2"; shift 2 ;;
+            --inner) (($# >= 2)) || { printf 'ERROR\t--inner takes hex\n' >&2; return 2; }
+                    inner="$2"; shift 2 ;;
+            --help|-h) cat >&2 <<'HELP'
+usage: --bridge <pfcp|ngap|sbi|diameter|gtpc|sigtran|ip> [addr] [--port N]
+                                                        [--teid HEX] [--qfi N]
+                                                        [--inner HEX]
+HELP
+                    return 0 ;;
+            *) printf 'ERROR\t--bridge does not take %s\n' "$(gtpu_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$service" ]] || {
+        printf 'ERROR\t--bridge needs a service: pfcp, ngap, sbi, diameter, gtpc, sigtran or ip\n' >&2
+        return 2; }
+    teid="${teid%0x}"; teid="${teid^^}"
+    [[ "$teid" =~ ^[0-9A-F]{1,8}$ ]] || {
+        printf 'ERROR\tTEID is 1-8 hex digits; got %s\n' "$(gtpu_sanitize "$teid")" >&2; return 2; }
+
+    # The destination each service sits on, per the table --boundary already owns.
+    local proto dport default_addr refpoint buys
+    case "$service" in
+        pfcp)     proto=udp;  dport=8805;  refpoint="N4, SMF to UPF";         buys="the rule that decides where this subscriber's packets go" ;;
+        gtpu)     proto=udp;  dport=2152;  refpoint="N3, N9, S1-U";           buys="a further tunnel: the receiver decapsulates again" ;;
+        ngap)     proto=sctp; dport=38412; refpoint="N2, gNB to AMF";         buys="registration, paging, and who is on the cell" ;;
+        gtpc)     proto=udp;  dport=2123;  refpoint="S11, S5/S8";             buys="bearer creation, and every TEID in use" ;;
+        diameter) proto=tcp;  dport=3868;  refpoint="S6a, Gx, Gy";            buys="subscriber profiles and charging records" ;;
+        sbi)      proto=tcp;  dport=8080;  refpoint="N7-N22";                 buys="the service layer, as JSON over HTTP/2" ;;
+        sigtran)  proto=sctp; dport=2905;  refpoint="M3UA to an STP";         buys="MAP, and every IMSI on the network" ;;
+        ip)       proto=ip;   dport=0;     refpoint="N6";                     buys="plain user traffic, no control plane at all" ;;
+        *) printf 'ERROR\tunknown service %s\n' "$(gtpu_sanitize "$service")" >&2; return 2 ;;
+    esac
+    [[ -z "$port" ]] || dport="$port"
+    # A private address is the honest default: an N4/N2 peer is addressed inside
+    # the operator's own plan, and inventing a routable one would make the plan
+    # look executable when it is a plan.
+    default_addr="10.0.0.1"
+    addr="${addr:-$default_addr}"
+    # A dotted-quad regex alone accepts 999.1.1.1; the octets have to be in
+    # range or the header builder below silently mangles the address.
+    local -a octs=()
+    IFS=. read -r -a octs <<< "$addr"
+    local ok4=yes o
+    (( ${#octs[@]} == 4 )) || ok4=no
+    if [[ "$ok4" == yes ]]; then
+        for o in "${octs[@]}"; do
+            [[ "$o" =~ ^[0-9]{1,3}$ ]] && (( 10#$o <= 255 )) || { ok4=no; break; }
+        done
+    fi
+    [[ "$ok4" == yes ]] || {
+        printf 'ERROR\t--bridge needs an IPv4 address; got %s\n' "$(gtpu_sanitize "$addr")" >&2
+        return 2; }
+
+    local inner_hex=""
+    if [[ -n "$inner" ]]; then
+        inner_hex="${inner// /}"; inner_hex="${inner//:/}"; inner_hex="${inner_hex^^}"
+        gtpu_is_hex "$inner_hex" || {
+            printf 'ERROR\t--inner must be even-length hex\n' >&2; return 2; }
+        (( ${#inner_hex} >= 40 )) || {
+            printf 'ERROR\t--inner is %d octets; an IPv4 header is at least 20\n' \
+                "$(( ${#inner_hex} / 2 ))" >&2; return 2; }
+    else
+        # Build a minimal but complete IPv4 header + 4 octets of payload. No
+        # checksum: the inner packet is a carrier for an address, not a packet
+        # that is expected to arrive anywhere.
+        local pt_hex
+        case "$proto" in udp) pt_hex=11 ;; tcp) pt_hex=06 ;; sctp) pt_hex=84 ;; *) pt_hex=3B ;; esac
+        local saddr="0A000001" daddr="" o
+        for o in 1 2 3 4; do
+            daddr+=$(printf '%02X' "$(( 10#$(printf '%s' "$addr" | cut -d. -f"$o") ))")
+        done
+        # ver/ihl 45, tos 00, total 0028, id 0001, flags/frag 4000, ttl 40,
+        # proto, checksum 0000, src 10.0.0.1, dst <addr>, then 8 octets of L4.
+        inner_hex="4500002800014000""40${pt_hex}0000${saddr}${daddr}"
+        if [[ "$proto" == ip ]]; then
+            inner_hex+="00000000"
+        else
+            local sport=3039
+            inner_hex+=$(printf '%04X%04X000800000000' "$sport" "$dport")
+        fi
+    fi
+
+    printf 'field\tvalue\n'
+    printf 'service\t%s\n' "$service"
+    printf 'reference_point\t%s\n' "$refpoint"
+    printf 'what_it_buys\t%s\n' "$buys"
+    printf 'inner_target\t%s\n' "$addr"
+    printf 'inner_l4\t%s/%s\n' "$proto" "$dport"
+    printf 'inner_octets\t%d\n' "$(( ${#inner_hex} / 2 ))"
+
+    # Ask --boundary what this inner packet reaches. That is the half that had to
+    # be invented; this verb must not reimplement it.
+    local bnd crosses barrier="-" bsvc
+    bnd=$(gtpu_cmd_boundary "$inner_hex" 2>/dev/null) || {
+        printf 'ERROR\tthe inner packet did not parse; --bridge built it, so this is a bug here\n' >&2
+        return 1; }
+    bsvc=$(printf '%s\n' "$bnd" | awk -F'\t' '$1=="service"{print $2}')
+    crosses=$(printf '%s\n' "$bnd" | awk -F'\t' '$1=="crosses"{print $2}')
+    printf 'boundary_sees\t%s\n' "${bsvc:-none}"
+    printf 'crosses\t%s\n' "${crosses:-no}"
+    case "${crosses:-no}" in
+        yes)
+            barrier="egress filtering that does not enforce the N3/N6 boundary"
+            printf 'barrier\t%s\n' "$barrier"
+            printf 'claim\tNBB in one line: user-plane traffic reaches %s because the boundary between N3/N6 and the control plane is not enforced on egress\n' "${bsvc:-the service}" ;;
+        *)
+            printf 'barrier\tnone this packet crosses: %s is not a control-plane service, so there is nothing to bridge to\n' \
+                "$service"
+            printf 'claim\tno crossing: pick a service port (--port 8805 for PFCP, 38412 for NGAP) to aim at a control plane\n' ;;
+    esac
+
+    # Then wrap it: G-PDU, TEID, optional PDU Session Container on N3.
+    local -a bargs=("$teid" --inner "$inner_hex")
+    [[ -n "$qfi" ]] && bargs+=(--qfi "$qfi")
+    local env_out
+    env_out=$(gtpu_cmd_build "${bargs[@]}" 2>&1) || {
+        printf '%s\n' "$env_out" >&2
+        printf 'ERROR\tthe envelope did not build\n' >&2; return 1; }
+    printf 'envelope_octets\t%s\n' "$(printf '%s\n' "$env_out" | awk -F'\t' '$1=="octets"{print $2; exit}')"
+    printf 'g_pdu_hex\t%s\n' "$(printf '%s\n' "$env_out" | awk -F'\t' '$1=="hex"{print $2; exit}')"
+    printf 'note\ta TEID is the receiver\x27s choice, not yours: this envelope needs a TEID that exists at the far end, which is what --teid-probe looks for\n'
+    printf 'note\tthe inner packet carries no valid IPv4 checksum on purpose: it is an address carrier, not a packet expected to arrive\n'
     return 0
 }
 
@@ -783,6 +1195,27 @@ gtpu_selftest() {
     chk parse-echo-flag    "$(fld "$out" flags)" "E=1 S=0 PN=0"
     chk parse-echo-seq     "$(fld "$out" sequence)" "0001"
 
+    # ── message-type table (TS 29.281 §7.1) ─────────────────────────────
+    # Every row here was wrong in one direction or the other before: 03 was
+    # labelled error-indication and 1A (26) had no row at all, so a type-26
+    # Error Indication — the T1 TEID oracle — parsed as `unknown`.
+    chk mname-echo-req     "$(gtpu_msg_name 01)" "echo-request"
+    chk mname-echo-rsp     "$(gtpu_msg_name 02)" "echo-response"
+    chk mname-vns          "$(gtpu_msg_name 03)" "version-not-supported"
+    chk mname-err-ind      "$(gtpu_msg_name 1A)" "error-indication"
+    chk mname-ext-hdr      "$(gtpu_msg_name 1F)" "supported-extension-headers-notification"
+    chk mname-end-marker   "$(gtpu_msg_name FE)" "end-marker"
+    chk mname-gpdu         "$(gtpu_msg_name FF)" "G-PDU"
+    chk mname-unknown      "$(gtpu_msg_name 7E)" "unknown"
+    # Parsed from the wire, not just from the helper: a real Error Indication
+    # (type 0x1A) must name itself, and 0x03 must not steal its name.
+    out=$(gtpu_cmd_parse "301A000400000000" 2>&1)
+    chk parse-type-1a-name "$(fld "$out" message_name)" "error-indication"
+    out=$(gtpu_cmd_parse "3003000400000000" 2>&1)
+    chk parse-type-03-name "$(fld "$out" message_name)" "version-not-supported"
+    out=$(gtpu_cmd_parse "30FE000400000000" 2>&1)
+    chk parse-type-fe-name "$(fld "$out" message_name)" "end-marker"
+
     # ── PDU Session Container (TS 38.415) ───────────────────────────────
     # DL, QFI 9, RQI 1, PPI 2 -> 00 09 49
     out=$(gtpu_build_psc 9 1 2 2>/dev/null)
@@ -836,6 +1269,30 @@ gtpu_selftest() {
     chk inner-private     "$(fld "$out" dst_scope | cut -c1-7)" "private"
     chk inner-routes      "$(fld "$out" delivery_rule | grep -c 'does not route')" "1"
 
+    # ── boundary: the inner packet read as a crossing ───────────────────
+    # A payload addressed at PFCP is not user traffic. It reaches the rule that
+    # decides where the subscriber's packets go, and nothing in the outer
+    # header said so.
+    out=$(gtpu_cmd_boundary "4500002900010000401100000a0000010a0000021234226500150000" 2>/dev/null)
+    chk boundary-pfcp       "$(fld "$out" service)" "PFCP"
+    chk boundary-crosses    "$(fld "$out" crosses)" "yes"
+    chk boundary-l4         "$(fld "$out" l4)" "udp"
+    chk boundary-dport      "$(fld "$out" dport)" "8805"
+    out=$(gtpu_cmd_boundary "4500002C00010000408400000a0000010a0000021234960C000000000000000000000000" 2>/dev/null)
+    chk boundary-ngap       "$(fld "$out" service)" "NGAP"
+    chk boundary-sctp       "$(fld "$out" l4)" "sctp"
+    out=$(gtpu_cmd_boundary "4500001C00010000401100000a0000010a0000021234086800040000" 2>/dev/null)
+    chk boundary-nested     "$(fld "$out" service)" "GTP-U"
+    out=$(gtpu_cmd_boundary "4500001C00010000401100000a000001080808081234003500080000" 2>/dev/null)
+    chk boundary-none       "$(fld "$out" service)" "none"
+    chk boundary-no-cross   "$(fld "$out" crosses)" "no"
+    chk boundary-routable   "$(fld "$out" dst_scope)" "routable"
+    # A version nibble of 6 is not inner IPv4 and must be refused, not decoded.
+    gtpu_cmd_boundary "6500001C00010000401100000a0000010a0000021234003500080000" >/dev/null 2>&1
+    chk boundary-bad-version "$?" "2"
+    out=$(gtpu_cmd_boundary 2>/dev/null)
+    chk boundary-table      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="PFCP"{print $3}')" "8805"
+
     # ── echo ────────────────────────────────────────────────────────────
     out=$(gtpu_cmd_echo 3 2>/dev/null)
     chk echo-count        "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^[0-9]+$/ {c++} END{print c+0}')" "3"
@@ -847,6 +1304,56 @@ gtpu_selftest() {
     chk detect-gpdu-teid-zero "$(printf '%s' "$out" | grep -c 'g_pdu_teid_zero')" "1"
     out=$(gtpu_cmd_detect "30000001000000010000000000000000" 2>/dev/null)
     chk detect-len-mismatch "$(printf '%s' "$out" | grep -c 'length_mismatch')" "1"
+
+    # ── --bridge (NBB delivery) ──────────────────────────────────────────
+    # Offline by construction: it composes --boundary with --build and touches no
+    # socket, so a network is never needed to prove it.
+    out=$(gtpu_cmd_bridge pfcp 10.0.0.5 2>&1)
+    chk bridge-service      "$(fld "$out" service)"            "pfcp"
+    chk bridge-refpoint     "$(fld "$out" reference_point)"    "N4, SMF to UPF"
+    chk bridge-l4           "$(fld "$out" inner_l4)"           "udp/8805"
+    chk bridge-crosses      "$(fld "$out" crosses)"            "yes"
+    # The claim is the finding: NBB is only a crossing if egress filtering did not
+    # enforce the boundary, and the row has to say so rather than imply access.
+    chk bridge-barrier      "$(printf '%s' "$out" | grep -c 'N3/N6 boundary')" "1"
+    chk bridge-envelope     "$(printf '%s' "$out" | awk -F'\t' '$1=="g_pdu_hex"{print substr($2,1,4)}')" "30FF"
+    # A non-control-plane destination must report no crossing, not a silent yes.
+    out=$(gtpu_cmd_bridge ip 2>&1)
+    chk bridge-ip-no-cross  "$(fld "$out" crosses)"            "no"
+    chk bridge-ip-service   "$(fld "$out" boundary_sees)"      "none"
+    # A typed port overrides the default and the boundary table follows it.
+    out=$(gtpu_cmd_bridge sbi 10.0.0.9 --port 9090 2>&1)
+    chk bridge-port-l4      "$(fld "$out" inner_l4)"           "tcp/9090"
+    chk bridge-port-crosses "$(fld "$out" crosses)"            "yes"
+    # A PDU Session Container rides the envelope only when asked.
+    out=$(gtpu_cmd_bridge ngap 10.1.2.3 --qfi 9 2>&1)
+    chk bridge-qfi-length   "$(fld "$out" envelope_octets)"    "50"
+    out=$(gtpu_cmd_bridge ngap 10.1.2.3 2>&1)
+    chk bridge-no-qfi       "$(fld "$out" envelope_octets)"    "38"
+    # Refusals name what is missing (rule 3), and exit 2 for a usage error.
+    out=$(gtpu_cmd_bridge 2>&1); rc=$?
+    chk bridge-needs-svc    "$rc" "2"
+    chk bridge-svc-reason   "$(printf '%s' "$out" | grep -c 'needs a service')" "1"
+    out=$(gtpu_cmd_bridge pfcp 999.1.1.1 2>&1); rc=$?
+    chk bridge-bad-addr     "$rc" "2"
+
+    # ── --teid-probe (T1) ────────────────────────────────────────────────
+    # Only the refusal paths are asserted: a selftest must run with no network,
+    # so the probe itself is exercised by hand, not here.
+    out=$(gtpu_cmd_teid_probe 2>&1); rc=$?
+    chk teidprobe-needs-ip  "$rc" "2"
+    chk teidprobe-reason    "$(printf '%s' "$out" | grep -c 'needs an address')" "1"
+    out=$(gtpu_cmd_teid_probe 10.0.0.1 --teid zzzz 2>&1); rc=$?
+    chk teidprobe-bad-teid  "$rc" "2"
+    out=$(gtpu_cmd_teid_probe 10.0.0.1 --port x 2>&1); rc=$?
+    chk teidprobe-bad-port  "$rc" "2"
+    # The wire half is a file this verb depends on; its absence is named, not
+    # worked around (rule 3).
+    chk teidprobe-tool-present "$([ -f "$IMSISTING_ROOT/tools/gtpu_probe.py" ] && echo yes)" "yes"
+    # And the table the oracle reads must be right in this module too --
+    # --teid-probe classifies on type 26, and a `unknown` there reports every
+    # live TEID as free.
+    chk teidprobe-oracle-name "$(gtpu_msg_name 1A)" "error-indication"
 
     printf 'RESULT\t%s\n' "$([ "$bad" -eq 0 ] && echo PASS || echo "FAIL bad=$bad")"
     (( bad == 0 ))
@@ -861,6 +1368,7 @@ gtpu_menu() {
         printf '  2) build a G-PDU            6) TEID scan\n'
         printf '  3) PDU Session Container    7) inner route\n'
         printf '  4) detect                   8) reference points\n'
+        printf '  9) boundary\n'
         printf '  0) back\n'
         read -rp '  choice: ' c
         case "$c" in
@@ -872,6 +1380,7 @@ gtpu_menu() {
             6) read -rp '  teid: ' h; gtpu_cmd_teid_scan "$h" ;;
             7) read -rp '  inner ipv4 hex: ' h; gtpu_cmd_inner_route "$h" ;;
             8) gtpu_cmd_paths ;;
+            9) read -rp '  inner ipv4 hex (blank for the table): ' h; gtpu_cmd_boundary "$h" ;;
             0) return ;;
             *) printf '  invalid\n' ;;
         esac
@@ -891,6 +1400,9 @@ gtpu_cli_main() {
         --teid-scan)   gtpu_cmd_teid_scan "${1:-}" ;;
         --inner-route) gtpu_cmd_inner_route "${1:-}" ;;
         --detect)      gtpu_cmd_detect "${1:-}" ;;
+        --boundary)    gtpu_cmd_boundary "${1:-}" ;;
+        --teid-probe)  gtpu_cmd_teid_probe "$@" ;;
+        --bridge)      gtpu_cmd_bridge "$@" ;;
         --paths)       gtpu_cmd_paths ;;
         --plan)        gtpu_cmd_plan "${1:-}" ;;
         --selftest)    gtpu_selftest ;;

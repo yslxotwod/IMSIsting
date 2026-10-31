@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 122.88 122.88">
+<!-- RCS: a message bubble with the two arcs a capability query answers with.
+     The bubble is the CPIM envelope; the arcs are the discovery request that
+     makes the answer a statement about a subscriber. -->
+<g fill="#c8d4e2">
+<path d="M12 18h98c6.6 0 12 5.4 12 12v50c0 6.6-5.4 12-12 12H52l-26 24V92H12C5.4 92 0 86.6 0 80V30c0-6.6 5.4-12 12-12zm8 16v6h84v-6H20zm0 18v6h60v-6H20zm0 18v6h42v-6H20z"/>
+</g>
+<g fill="none" stroke="#c8d4e2" stroke-width="7" stroke-linecap="round">
+<path d="M86 40a24 24 0 0 1 0 34"/>
+<path d="M99 29a40 40 0 0 1 0 56"/>
+</g>
+</svg>

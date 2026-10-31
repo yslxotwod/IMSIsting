@@ -78,3 +78,11 @@ gui.stderr
 !/data/opops/
 /data/opops/*
 !/data/opops/*.dist
+
+# ── local packaging and session scratch ─────────────────────────────────
+# dist/ is what tools/make-npm-package.sh builds, not source.
+/dist/
+# Agent session state (requirements/chat/trace) that lands in whatever
+# directory a tool is run from -- it is not part of the project.
+/.kunsdd/
+/native/.dsh-mattskillsdeck-cache/

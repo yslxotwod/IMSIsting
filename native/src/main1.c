@@ -749,7 +749,7 @@ static const ModuleDefinition modules[] = {
       "NR sidelink on PC5: resource pools, SCI-1A, ITS certificates and relay checks." },
     { "49_ntn",              "5G NTN / Satellite",   "RADIO",
       "imsisting-49_ntn-symbolic",
-      "Non-terrestrial access: Doppler, round-trip delay, TA, k_offset and the SIB19 fields." },
+      "Non-terrestrial access: the orbit behind it (element sets, SGP4 propagation, passes) and the timing it produces (Doppler, round-trip delay, TA, k_offset, SIB19)." },
     { "53_non3gpp",          "TETRA / DMR / GSM-R",  "RADIO",
       "imsisting-53_non3gpp-symbolic",
       "Non-3GPP land mobile radio: TETRA, DMR and GSM-R structure, ciphers and band classification." },
@@ -918,8 +918,21 @@ static const ModuleDefinition modules[] = {
     /* 63 — the back door: management planes, fronthaul, and the tower's own software. */
     { "63_ran_attacks",      "RAN / C-RAN Attacks",  "CORE NETWORK",
       "imsisting-48_oran-symbolic",
-      "The tower approached as an operator would reach it: SNMP on the management VLAN, a CWMP ACS, O1 NETCONF, malformed N2, the published CVEs, and the CPRI/eCPRI fronthaul that carries raw IQ." }
+      "The tower approached as an operator would reach it: SNMP on the management VLAN, a CWMP ACS, O1 NETCONF, malformed N2, the published CVEs, and the CPRI/eCPRI fronthaul that carries raw IQ." },
 
+    /* 64 — the modem's text protocol. 56 reaches the binary DIAG port; this
+     * one reaches the port every dongle, CPE, IoT board and handset answers on. */
+    { "64_modem_at",         "Modem AT Surface",     "BASEBAND / DEVICE",
+      "imsisting-64_modem_at-symbolic",
+      "The AT command surface a modem exposes: who it is, what cell it believes it is on, the SIM files behind the subscription, the commands that change it, the NV store, and the modem's own TCP stack." },
+
+    /* 65 -- the messaging plane. 30 reaches VoLTE; this one reaches the service
+     * layer above it: the document that provisions a handset, the query that
+     * answers with a subscriber's capabilities, and the codecs a message
+     * travels in. */
+    { "65_rcs",              "RCS Messaging",       "CORE NETWORK",
+      "imsisting-65_rcs-symbolic",
+      "Rich Communication Services on IMS: the autoconfiguration document, capability discovery and the CPIM/MSRP messaging plane." },
 };
 
 static const char *
@@ -7273,6 +7286,10 @@ static const ChipRow chip_rows[] = {
     { "11_lte_core",         "--gtp-screen-peer",     NEED_NO, DOES_READS },
     { "11_lte_core",         "--diameter-screen",     NEED_NO, DOES_READS },
     { "11_lte_core",         "--gtpc-send",           NEED_NO, DOES_SENDS },
+    { "11_lte_core",         "--gtpdoor-build",       NEED_NO, DOES_BUILDS },
+    { "11_lte_core",         "--gtpdoor-parse",       NEED_NO, DOES_READS },
+    { "11_lte_core",         "--grx-scan",            NEED_NO, DOES_SENDS },
+    { "11_lte_core",         "--ipx-map",             NEED_NO, DOES_READS },
     { "11_lte_core",         "--flood-model",         NEED_NO, DOES_READS },
     { "11_lte_core",         "--ro-ccr",              NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--ro-parse",            NEED_NO, DOES_READS },
@@ -7373,6 +7390,7 @@ static const ChipRow chip_rows[] = {
     { "13_nr_core",          "--pfcp-build",          NEED_NO, DOES_BUILDS },
     { "13_nr_core",          "--pfcp-rules",          NEED_NO, DOES_READS },
     { "13_nr_core",          "--pfcp-send",           NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--pfcp-dup",            NEED_NO, DOES_BUILDS },
     { "13_nr_core",          "--pfcp-hijack",         NEED_NO, DOES_BUILDS },
     { "13_nr_core",          "--pfcp-delete",         NEED_NO, DOES_BUILDS },
     { "13_nr_core",          "--plan",                NEED_NO, DOES_READS },
@@ -8296,6 +8314,7 @@ static const ChipRow chip_rows[] = {
     { "61_gnss",             "--ubx",                 NEED_NO, DOES_READS },
     { "61_gnss",             "--ubx-pvt",             NEED_NO, DOES_BUILDS },
     { "62_gtpu",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "62_gtpu",             "--boundary",            NEED_NO, DOES_READS },
     { "62_gtpu",             "--build",               NEED_NO, DOES_BUILDS },
     { "62_gtpu",             "--detect",              NEED_NO, DOES_READS },
     { "62_gtpu",             "--echo",                NEED_NO, DOES_BUILDS },
@@ -8700,6 +8719,55 @@ static const ChipRow chip_rows[] = {
     { "26_ss7_map",          "--cap-surface",         NEED_NO, DOES_READS },
     { "45_iot",            "--nprach-decode",        NEED_NO, DOES_READS },
     { "57_evil_twin",      "--selftest",             NEED_NO, DOES_READS },
+
+    { "64_modem_at",       "--__index_probe__",   NEED_NO, DOES_READS },
+    { "64_modem_at",       "--at-ctrl",           NEED_CAP, DOES_MODIFIES },
+    { "64_modem_at",       "--at-eng",            NEED_CAP, DOES_READS },
+    { "64_modem_at",       "--at-nv",             NEED_CAP, DOES_MODIFIES },
+    { "64_modem_at",       "--at-parse",          NEED_NO, DOES_READS },
+    { "64_modem_at",       "--at-plan",           NEED_NO, DOES_READS },
+    { "64_modem_at",       "--at-raw",            NEED_CAP, DOES_SENDS },
+    { "64_modem_at",       "--at-session",        NEED_CAP, DOES_READS },
+    { "64_modem_at",       "--at-sim",            NEED_SIM, DOES_READS },
+    { "64_modem_at",       "--at-stack",          NEED_CAP, DOES_SENDS },
+    { "64_modem_at",       "--at-surface",        NEED_NO, DOES_READS },
+    { "64_modem_at",       "--at-walk",           NEED_CAP, DOES_SENDS },
+    { "64_modem_at",       "--menu",              NEED_NO, DOES_READS },
+    { "64_modem_at",       "--selftest",          NEED_NO, DOES_READS },
+    { "64_modem_at",       "--status-tsv",        NEED_NO, DOES_READS },
+
+    /* 65_rcs — nothing here radiates; --config-fetch is a single HTTPS GET of a
+       document the network publishes to any handset, so it is the one verb on
+       this page that puts a packet on the wire. */
+    { "65_rcs",            "--__index_probe__",   NEED_NO, DOES_READS },
+    { "65_rcs",            "--config-fetch",      NEED_NO, DOES_SENDS },
+    { "65_rcs",            "--config-flat",       NEED_NO, DOES_READS },
+    { "65_rcs",            "--config-parse",      NEED_NO, DOES_READS },
+    { "65_rcs",            "--cpim-build",        NEED_NO, DOES_BUILDS },
+    { "65_rcs",            "--cpim-parse",        NEED_NO, DOES_READS },
+    { "65_rcs",            "--features",          NEED_NO, DOES_READS },
+    { "65_rcs",            "--info",              NEED_NO, DOES_READS },
+    { "65_rcs",            "--menu",              NEED_NO, DOES_READS },
+    { "65_rcs",            "--msrp-build",        NEED_NO, DOES_BUILDS },
+    { "65_rcs",            "--msrp-parse",        NEED_NO, DOES_READS },
+    { "65_rcs",            "--plan",              NEED_NO, DOES_READS },
+    { "65_rcs",            "--presence-audit",    NEED_NO, DOES_READS },
+    { "65_rcs",            "--selftest",          NEED_NO, DOES_READS },
+    { "65_rcs",            "--sip-cap-build",     NEED_NO, DOES_BUILDS },
+    { "65_rcs",            "--sip-cap-parse",     NEED_NO, DOES_READS },
+    { "65_rcs",            "--status-tsv",        NEED_NO, DOES_READS },
+
+    /* 49_ntn — the orbit verbs, appended where the module's other rows live.
+       None of them radiates: the arithmetic is the whole of it. */
+    { "49_ntn",            "--doppler-pass",      NEED_NO, DOES_READS },
+    { "49_ntn",            "--footprint",         NEED_NO, DOES_READS },
+    { "49_ntn",            "--ntn-config",        NEED_NO, DOES_READS },
+    { "49_ntn",            "--pass-plan",         NEED_NO, DOES_READS },
+    { "49_ntn",            "--regulatory-check",  NEED_NO, DOES_READS },
+    { "49_ntn",            "--sgp4",              NEED_NO, DOES_READS },
+    { "49_ntn",            "--store-forward",     NEED_NO, DOES_READS },
+    { "49_ntn",            "--ta-schedule",       NEED_NO, DOES_READS },
+    { "49_ntn",            "--tle-parse",         NEED_NO, DOES_READS },
 };
 
 static const char *
@@ -26276,6 +26344,88 @@ lcore_build_charging(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The interconnect, approached as a channel rather than a message.
+ *
+ * --gtpdoor-detect read this class of abuse and had nothing that produced it,
+ * so the builder here is the sample the detector is tested against; --grx-scan
+ * answers the other half, whether a node on the far side of a roaming exchange
+ * is there at all, with silence as a verdict of its own; --ipx-map is the scan
+ * joined back to the peer rule, because the interesting row is the address
+ * that answered and that nobody has a contract with.
+ */
+static GtkWidget *
+lcore_build_interconnect(AppState *state, const char *module_id,
+                         GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE ROAMING SIDE",
+        "A core's interconnect: the channel that survives between operators, "
+        "and the neighbours that answer on it.", &body);
+    GtkWidget *chan_body, *scan_body, *map_body;
+    GtkWidget *chan = verb_card("BUILD THE CHANNEL", &chan_body);
+    GtkWidget *scan = verb_card("SWEEP A PREFIX", &scan_body);
+    GtkWidget *map = verb_card("READ THE INVENTORY", &map_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(chan_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Task",
+                "--gtpdoor-build", "310150123456789 identity",
+                "An IMSI and a task. The task rides a Private Extension inside "
+                "an Echo — the one GTP-C message a peer may send with no "
+                "session behind it — and the tasks are identity, location, "
+                "bearers, detach, sleep and raw."));
+        gtk_box_append(GTK_BOX(chan_body), res);
+    }
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(chan_body),
+            mod_arg_row(state, module_id, status, "Read It Back",
+                "--gtpdoor-parse", "4001001D00000100...",
+                "The octets the builder just printed. Reads the task, the IMSI "
+                "and the parameter back, in either direction."));
+        gtk_box_append(GTK_BOX(chan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), chan);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(scan_body),
+            mod_arg_row(state, module_id, status, "Scan",
+                "--grx-scan", "203.0.113.0/24 --proto gtpc",
+                "A prefix or a file of them, and the probe to send. Every "
+                "address comes back answered, spoke-something-else, or "
+                "unobserved — silence is never reported as a closed port."));
+        gtk_box_append(GTK_BOX(scan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), scan);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(map_body),
+            mod_arg_row(state, module_id, status, "Map It",
+                "--ipx-map", "reachability.tsv",
+                "A scan written with --out. Each PLMN is counted by what "
+                "answered, and the row that matters is the address that "
+                "answered without being inside any contracted peer prefix."));
+        gtk_box_append(GTK_BOX(map_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), map);
+
+    mod_card_end();
+    (void) status;
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry lcore_entries[] = {
     { "State", "dialog-information-symbolic", NULL, lcore_build_read },
     { "Build message", "document-new-symbolic", NULL, lcore_build_build },
@@ -26283,6 +26433,7 @@ static ModuleSubmenuEntry lcore_entries[] = {
       lcore_build_encapsulate },
     { "Audit checks", "system-search-symbolic", NULL, lcore_build_audit },
     { "Charging", "document-send-symbolic", NULL, lcore_build_charging },
+    { "Interconnect", "network-wired-symbolic", NULL, lcore_build_interconnect },
 };
 /* 12_nr_air — NR and the gNB a lab runs.
  *
@@ -26690,9 +26841,9 @@ ncore_build_forge(AppState *state, const char *module_id,
                 "The rules a session is made of, the establishment request that "
                 "carries them, or the GTP-U header that steers the result.",
                 (const char *[]) { "--pfcp-rules", "--pfcp-build",
-                                   "--gtpu-header" },
+                                   "--pfcp-dup", "--gtpu-header" },
                 (const char *[]) { "Rules", "Session Request",
-                                   "N3 Header" }, 3));
+                                   "Duplicate IDs", "N3 Header" }, 4));
         gtk_box_append(GTK_BOX(pfcp_body), res);
     }
     gtk_box_append(GTK_BOX(body), pfcp);
@@ -26711,6 +26862,12 @@ ncore_build_forge(AppState *state, const char *module_id,
                 "--pfcp-send", "10.0.0.2 8805",
                 "Host and port on UDP 8805. Same arming rule as the NGAP "
                 "sender."));
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row(state, module_id, status, "SEIDs at a UPF",
+                "--pfcp-seid-scan", "upf.example.invalid",
+                "A host, optionally with --seid, or --from and --to, or "
+                "--count. A node that holds the session answers anything but "
+                "\"context not found\", which is the whole channel."));
         gtk_box_append(GTK_BOX(send_body),
             mod_arg_choices(state, module_id, status, "Read the plan", "",
                 "What a testbed needs for the named attack, and what to record.",
@@ -37417,6 +37574,14 @@ gtpu_build_decode(AppState *state, const char *module_id,
         "actually lands once the peer decapsulates."));
     gtk_box_append(GTK_BOX(body), card);
 
+    card = verb_card("BOUNDARY", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Read crossing", "--boundary", "an inner IPv4 packet as hex, or nothing",
+        "The same inner destination asked as a control-plane question: PFCP on "
+        "8805, NGAP on 38412, GTP-U on 2152. Leave the field empty for the "
+        "table of what reaching each one buys."));
+    gtk_box_append(GTK_BOX(body), card);
+
     card = verb_card("DETECT", &card_body);
     gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
         "Find anomalies", "--detect", "a pcap path or a packet as hex",
@@ -37692,9 +37857,56 @@ static ModuleSubmenuEntry ran_entries[] = {
     { "Fronthaul", "network-wired-symbolic", NULL, ran_build_fronthaul },
 };
 
+/* The two verbs that put a packet at a peer rather than describe one. A TEID is
+ * the receiver's choice, so asking which TEIDs a node does not know is the only
+ * way to learn one from outside; --bridge asks the same question about the
+ * boundary between the user plane and the control plane. */
+static GtkWidget *
+gtpu_build_probe(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ASK A PEER",
+        "UDP 2152 is a bare port. A node that holds a session answers an empty "
+        "Session Modification Request with anything but \"context not found\", "
+        "and that difference is the oracle.", &body);
+    GtkWidget *probe_body, *bridge_body;
+    GtkWidget *probe = verb_card("TEID ORACLE", &probe_body);
+    GtkWidget *bridge = verb_card("NETWORK BOUNDARY BRIDGING", &bridge_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(probe_body), mod_arg_row(state, module_id, status,
+        "Ask for unknown TEIDs", "--teid-probe", "upf.example.invalid",
+        "One address. Add --teid, or --teid-from with --teid-to, or --count, "
+        "after it: those are arguments, and the ones an operator has to choose."));
+    gtk_box_append(GTK_BOX(probe_body), mod_arg_row(state, module_id, status,
+        "Ask without echo", "--teid-probe --no-echo", "upf.example.invalid",
+        "The same query with the echo suppressed, for a peer that logs every "
+        "datagram it receives."));
+    gtk_box_append(GTK_BOX(probe_body), res);
+    gtk_box_append(GTK_BOX(body), probe);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(bridge_body), mod_arg_row(state, module_id, status,
+        "Aim inside", "--bridge", "svc.example.invalid 10.0.0.9",
+        "The service to aim at, then the address to send through. Reports the "
+        "G-PDU that carries it and whether the far side treated the inner "
+        "packet as a crossing."));
+    gtk_box_append(GTK_BOX(bridge_body), res);
+    gtk_box_append(GTK_BOX(body), bridge);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gtpu_entries[] = {
     { "Decode", "document-open-symbolic", NULL, gtpu_build_decode },
     { "Build", "network-transmit-receive-symbolic", NULL, gtpu_build_build },
+    { "Ask a peer", "network-wired-symbolic", NULL, gtpu_build_probe },
 };
 /* 45_iot — NB-IoT / Cat-M1.
  *
@@ -38782,6 +38994,82 @@ ntn_build_gmr(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The orbit page: where the satellite is, and what that does to the link over
+ * the next pass. SIB19 tells a UE the state vector; this page is what produces
+ * it, which is why it sits inside the NTN module rather than beside it. */
+static GtkWidget *
+ntn_build_orbit(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE ORBIT",
+        "An NTN-capable handset is given the satellite's own orbital elements "
+        "and works out where it is. Everything the timing page computes "
+        "downstream starts here.", &body);
+    GtkWidget *eph_body, *pass_body, *beam_body;
+    GtkWidget *eph = verb_card("EPHEMERIS", &eph_body);
+    GtkWidget *pass = verb_card("WHAT THE PASS DOES TO THE LINK", &pass_body);
+    GtkWidget *beam = verb_card("WHAT THE BEAM COVERS", &beam_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(eph_body), mod_arg_row(state, module_id, status,
+        "Element set", "--tle-parse", "element-set.txt",
+        "Fixed columns: epoch as a two-digit year and a fractional day, "
+        "eccentricity with an implied decimal point, and a mod-10 checksum."));
+    gtk_box_append(GTK_BOX(eph_body), mod_arg_row(state, module_id, status,
+        "State vector", "--sgp4", "element-set.txt 0",
+        "File, then minutes past the epoch. An element set with a period beyond "
+        "225 minutes is refused by name: this implements SGP4, not SDP4."));
+    gtk_box_append(GTK_BOX(eph_body), mod_arg_row(state, module_id, status,
+        "Broadcast plan", "--ntn-config", "element-set.txt 0",
+        "The ephemeris fields a cell would put in SIB19, and the timers it does "
+        "not derive. The line encoding is a separate job and the page says so."));
+    gtk_box_append(GTK_BOX(eph_body), res);
+    gtk_box_append(GTK_BOX(body), eph);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(pass_body), mod_arg_row(state, module_id, status,
+        "Passes", "--pass-plan", "52.0 13.4 element-set.txt",
+        "Latitude, longitude, then the element set. Reports acquisition, loss "
+        "and maximum elevation, because a five-degree pass and an "
+        "eighty-five-degree pass are different services."));
+    gtk_box_append(GTK_BOX(pass_body), mod_arg_row(state, module_id, status,
+        "Doppler", "--doppler-pass", "52.0 13.4 element-set.txt 1900",
+        "Latitude, longitude, element set, carrier in MHz. Range, range-rate, "
+        "the shift and the one-way delay, sampled across the pass."));
+    gtk_box_append(GTK_BOX(pass_body), mod_arg_row(state, module_id, status,
+        "Timing advance", "--ta-schedule", "52.0 13.4 element-set.txt",
+        "The commanded advance against time, in steps of 16 Ts. It goes stale "
+        "within seconds, which is why the network broadcasts a drift term."));
+    gtk_box_append(GTK_BOX(pass_body), res);
+    gtk_box_append(GTK_BOX(body), pass);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(beam_body), mod_arg_row(state, module_id, status,
+        "Coverage circle", "--footprint", "element-set.txt 0 10",
+        "Element set, minutes past the epoch, then the elevation floor. The "
+        "floor shrinks the circle, so a coverage claim needs the floor it used."));
+    gtk_box_append(GTK_BOX(beam_body), mod_arg_row(state, module_id, status,
+        "Against an outline", "--regulatory-check",
+        "element-set.txt 0 10 001-01 -5,-10,10,15",
+        "Element set, minutes, elevation floor, PLMN, then the country outline. "
+        "With no outline the answer is unobserved, never inside."));
+    gtk_box_append(GTK_BOX(beam_body), mod_arg_row(state, module_id, status,
+        "Duty cycle", "--store-forward", "52.0 13.4 element-set.txt 12",
+        "Latitude, longitude, element set, then the window in hours. The answer "
+        "is the worst gap, because that is the buffer a handset has to hold."));
+    gtk_box_append(GTK_BOX(beam_body), res);
+    gtk_box_append(GTK_BOX(body), beam);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ntn_entries[] = {
     { "Geometry", "dialog-information-symbolic", NULL, ntn_build_geometry },
     { "Timing control", "network-wireless-symbolic", NULL, ntn_build_link },
@@ -38789,6 +39077,7 @@ static ModuleSubmenuEntry ntn_entries[] = {
     { "Behind the satellite", "network-transmit-receive-symbolic", NULL,
       ntn_build_feeder },
     { "Legacy satellite", "phone-symbolic", NULL, ntn_build_gmr },
+    { "The orbit", "x-office-calendar-symbolic", NULL, ntn_build_orbit },
 };
 /* 50_gprs — GPRS / EDGE.
  *
@@ -40343,6 +40632,676 @@ static ModuleSubmenuEntry bbdg_entries[] = {
     { "Modem commands", "network-wireless-symbolic", NULL, bbdg_build_at },
 };
 
+/* ── 64_modem_at — the modem's own management port ─────────────────────────
+ * The AT surface is the second protocol a modem speaks: text over a tty, TS
+ * 27.007 for the general set and a vendor dialect on top for the engineering
+ * pages. Where 56_baseband_diag reaches the binary DIAG port, this reaches the
+ * one every dongle, CPE, IoT board and handset in diag mode answers on.
+ *
+ * Every view below reports what the device claims, and the module marks that
+ * claim in its `source` column. A field the vendor grammar does not carry is
+ * not-advertised rather than zero, which is the whole difference between a
+ * survey and a guess.
+ */
+static GtkWidget *
+atm_build_ports(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MODEM PORTS",
+        "Every modem node this host exposes, what each one is, and which of "
+        "them answers a text command.", &body);
+    GtkWidget *list_body, *walk_body;
+    GtkWidget *list = verb_card("LIST THE PORTS", &list_body);
+    GtkWidget *walk = verb_card("FIND OUT WHAT IT ACCEPTS", &walk_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_choices(state, module_id, status, "Read the nodes", "",
+                "The serial and QMI nodes this host exposes, with the USB "
+                "interface number that decides which is the command port and "
+                "which is a diagnostic or GPS stream.",
+                (const char *[]) { "--at-surface", "--at-surface probe" },
+                (const char *[]) { "List", "List and Probe" }, 2));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(walk_body),
+            mod_arg_row_prefilled(state, module_id, status, "Walk the Commands",
+                "--at-walk", "/dev/ttyUSB2",
+                "A port. Every documented query this firmware should answer is "
+                "sent, and each comes back accepted, rejected with the device's "
+                "own error code, or silent. Query forms only, so a walk changes "
+                "nothing on the device."));
+        gtk_box_append(GTK_BOX(walk_body), res);
+        gtk_box_append(GTK_BOX(walk_body),
+            mod_arg_row_prefilled(state, module_id, status, "Send One Command",
+                "--at-raw", "/dev/ttyUSB2 AT+CGSN",
+                "A port and a command, sent verbatim. The answer keeps the "
+                "device's own result code, so ERROR, +CME ERROR and silence "
+                "stay three different answers."));
+    }
+    gtk_box_append(GTK_BOX(body), walk);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+atm_build_identity(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DEVICE IDENTITY",
+        "Who the device is and whose subscription is in it: make, model, "
+        "firmware, serial number, IMSI and ICCID, each with the arithmetic "
+        "that checks it.", &body);
+    GtkWidget *dev_body, *tx_body, *state_body;
+    GtkWidget *dev = verb_card("READ THE DEVICE", &dev_body);
+    GtkWidget *tx = verb_card("READ A SAVED TRANSCRIPT", &tx_body);
+    GtkWidget *statecard = verb_card("MODULE STATE", &state_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dev_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Identity",
+                "--at-session", "/dev/ttyUSB2",
+                "A port. Make, model, firmware, IMEI split into its allocation "
+                "code and reporting body with the check digit recomputed, IMSI "
+                "split into MCC, MNC and MSIN, the ICCID, the SIM state, and "
+                "the network it is actually registered on."));
+        gtk_box_append(GTK_BOX(dev_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dev);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tx_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode a Transcript",
+                "--at-parse", "/home/user/modem-session.txt",
+                "A saved AT session. The same parsers a live read uses, run "
+                "over a file, so a session captured on somebody else's bench "
+                "still yields its identity, its engineering page and its file "
+                "reads with the status words named."));
+        gtk_box_append(GTK_BOX(tx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tx);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(state_body),
+            mod_arg_choices(state, module_id, status, "Read the state", "",
+                "How many modem nodes this host has, whether the PLMN register "
+                "has been downloaded, and whether a test tty is in play.",
+                (const char *[]) { "--status-tsv" },
+                (const char *[]) { "State" }, 1));
+        gtk_box_append(GTK_BOX(state_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), statecard);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+atm_build_radio(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SERVING CELL",
+        "What the modem believes about the cell it is on, decoded into the same "
+        "columns a radio survey writes, and marked as the device's claim rather "
+        "than as a measurement.", &body);
+    GtkWidget *eng_body, *read_body;
+    GtkWidget *eng = verb_card("ASK THE MODEM", &eng_body);
+    GtkWidget *read = verb_card("DECODE A SAVED PAGE", &read_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(eng_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Cell",
+                "--at-eng", "/dev/ttyUSB2",
+                "A port. The vendor engineering page is tried in turn, the RAT "
+                "and its field order are read from the answer, and the row "
+                "names which page supplied it. Ciphering is not a field any of "
+                "these grammars carries, so it is reported unobserved."));
+        gtk_box_append(GTK_BOX(eng_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), eng);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode One Answer",
+                "--at-parse", "+QENG: \"servingcell\",\"LTE\",0,208,01,0A1B2C3",
+                "A saved engineering page. Every field the grammar carries is "
+                "named, and the ones it does not carry stay absent instead of "
+                "being filled with a plausible zero."));
+        gtk_box_append(GTK_BOX(read_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), read);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+atm_build_sim(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SIM FILES",
+        "The card's own file system, read through the modem: the subscription "
+        "identity, the operator name, and the byte that decides how long the "
+        "network code is.", &body);
+    GtkWidget *walk_body, *one_body, *apdu_body;
+    GtkWidget *walk = verb_card("WALK THE FILES", &walk_body);
+    GtkWidget *one = verb_card("READ ONE FILE", &one_body);
+    GtkWidget *apdu = verb_card("SEND AN APDU", &apdu_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(walk_body),
+            mod_arg_row_prefilled(state, module_id, status, "Walk the Card",
+                "--at-sim", "/dev/ttyUSB2",
+                "A port. The IMSI, the ICCID, the MNC-length byte, the operator "
+                "name with its display conditions, and the short-form dialling "
+                "numbers, each with the status word the card answered. A file "
+                "the card refuses is reported as refused, naming the reason."));
+        gtk_box_append(GTK_BOX(walk_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), walk);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(one_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a File",
+                "--at-sim", "/dev/ttyUSB2 ef 6F07",
+                "A port and a four-digit file id. The path and length come from "
+                "the module's own file table, so a file it does not know is "
+                "still read, just without a decoder attached."));
+        gtk_box_append(GTK_BOX(one_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), one);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(apdu_body),
+            mod_arg_row_prefilled(state, module_id, status, "Send an APDU",
+                "--at-sim", "/dev/ttyUSB2 csim 00A40004023F00",
+                "A port and a hex APDU. This is the generic form, so any "
+                "instruction the card supports goes out — the status word is "
+                "named, and an attempt counter on a blocked PIN is read rather "
+                "than rounded to a failure."));
+        gtk_box_append(GTK_BOX(apdu_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), apdu);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+atm_build_ctrl(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RADIO CONTROL",
+        "The commands that change what the device does rather than ask what it "
+        "knows: network selection, the data context, the lock state, and the "
+        "power switch.", &body);
+    GtkWidget *read_body, *net_body, *apn_body, *power_body, *plan_body;
+    GtkWidget *read = verb_card("READ THE STATE", &read_body);
+    GtkWidget *net = verb_card("SELECT A NETWORK", &net_body);
+    GtkWidget *apn = verb_card("SET THE DATA CONTEXT", &apn_body);
+    GtkWidget *power = verb_card("SWITCH IT", &power_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the State",
+                "--at-ctrl", "/dev/ttyUSB2 status",
+                "A port. Registration, operator, the defined data contexts, the "
+                "power mode and the SIM lock are each queried and each answer "
+                "keeps its own result code."));
+        gtk_box_append(GTK_BOX(read_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), read);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(net_body),
+            mod_arg_row_prefilled(state, module_id, status, "Pin the Network",
+                "--at-ctrl", "/dev/ttyUSB2 cops 20801",
+                "A port and a five or six digit network code. This forces manual "
+                "selection and the device stays on that network until automatic "
+                "selection is restored, which is a change to the device and not "
+                "a query."));
+        gtk_box_append(GTK_BOX(net_body), res);
+        gtk_box_append(GTK_BOX(net_body),
+            mod_arg_choices(state, module_id, status, "Restore automatic", "",
+                "Hand selection back to the network's own list.",
+                (const char *[]) { "--at-ctrl /dev/ttyUSB2 cops-auto" },
+                (const char *[]) { "Automatic" }, 1));
+    }
+    gtk_box_append(GTK_BOX(body), net);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(apn_body),
+            mod_arg_row_prefilled(state, module_id, status, "Set a Context",
+                "--at-ctrl", "/dev/ttyUSB2 apn internet 1",
+                "A port, an access point name and optionally a context id. The "
+                "context is written to the device and survives a power cycle "
+                "until it is written again."));
+        gtk_box_append(GTK_BOX(apn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), apn);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(power_body),
+            mod_arg_choices(state, module_id, status, "Set the power mode", "",
+                "Off turns the radio off and the host loses its network "
+                "immediately; reset re-attaches the modem from scratch; lock "
+                "and unlock toggle a facility with the password that guards it.",
+                (const char *[]) { "--at-ctrl /dev/ttyUSB2 cfun 0",
+                                   "--at-ctrl /dev/ttyUSB2 cfun 1",
+                                   "--at-ctrl /dev/ttyUSB2 reset",
+                                   "--at-ctrl /dev/ttyUSB2 lock SC 1 0000" },
+                (const char *[]) { "Radio Off", "Radio On", "Reset",
+                                   "Lock" }, 4));
+        gtk_box_append(GTK_BOX(power_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), power);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "What a run costs", "",
+                "The order these would be sent in, and which of them cannot be "
+                "undone by sending the opposite command.",
+                (const char *[]) { "--at-plan ctrl", "--at-plan" },
+                (const char *[]) { "This Page", "Everything" }, 2));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+atm_build_nv(AppState *state, const char *module_id,
+             GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("NV ITEMS",
+        "The store the device boots from: calibration, provisioning, and the "
+        "identity numbers the network sees. Read first, every time — the old "
+        "value is the only backup there is.", &body);
+    GtkWidget *read_body, *write_body, *id_body, *plan_body;
+    GtkWidget *read = verb_card("READ AN ITEM", &read_body);
+    GtkWidget *write = verb_card("WRITE AN ITEM", &write_body);
+    GtkWidget *id = verb_card("THE IDENTITY SLOT", &id_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read an Item",
+                "--at-nv", "/dev/ttyUSB2 read 5",
+                "A port and the item address the operator supplies. No item "
+                "table ships with this module: no published table maps these "
+                "addresses to meanings, and a hardcoded guess would be a "
+                "feature-shaped guess."));
+        gtk_box_append(GTK_BOX(read_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), read);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(write_body),
+            mod_arg_row_prefilled(state, module_id, status, "Write an Item",
+                "--at-nv", "/dev/ttyUSB2 write 5 00",
+                "A port, an item and the hex value. This writes. There is no "
+                "rollback, and the only copy of the previous value is the one "
+                "the read above printed."));
+        gtk_box_append(GTK_BOX(write_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), write);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(id_body),
+            mod_arg_choices(state, module_id, status, "The identity slot", "",
+                "The slot the network's view of this device comes from. Reading "
+                "it is a query; writing it changes what the network sees, and "
+                "the original is gone once the write lands.",
+                (const char *[]) { "--at-nv /dev/ttyUSB2 egmr-read",
+                                   "--at-nv /dev/ttyUSB2 imei 353325060462136" },
+                (const char *[]) { "Read", "Write" }, 2));
+        gtk_box_append(GTK_BOX(id_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), id);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "What a run costs", "",
+                "Which steps in this page can be taken back, and which cannot.",
+                (const char *[]) { "--at-plan nv" },
+                (const char *[]) { "This Page" }, 1));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+atm_build_stack(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MODEM-SIDE STACK",
+        "The modem's own TCP/IP stack. A socket opened here does not touch the "
+        "host, survives a host reboot, and keeps sending while the machine it "
+        "is bolted to is powered off.", &body);
+    GtkWidget *look_body, *open_body, *send_body, *plan_body;
+    GtkWidget *look = verb_card("LOOK AT IT", &look_body);
+    GtkWidget *opencard = verb_card("OPEN A SOCKET", &open_body);
+    GtkWidget *send = verb_card("USE IT", &send_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(look_body),
+            mod_arg_choices(state, module_id, status, "Read the sockets", "",
+                "The connections the modem is holding right now, and the local "
+                "address it was given, which is the host's only clue that the "
+                "module has a network of its own.",
+                (const char *[]) { "--at-stack /dev/ttyUSB2 state" },
+                (const char *[]) { "State" }, 1));
+        gtk_box_append(GTK_BOX(look_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), look);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(open_body),
+            mod_arg_row_prefilled(state, module_id, status, "Open a Socket",
+                "--at-stack", "/dev/ttyUSB2 open tcp 127.0.0.1 9000",
+                "A port, a protocol, a host and a port on that host. The "
+                "connection is made by the modem, so it is visible to the far "
+                "end as this device and not as anything the host is running."));
+        gtk_box_append(GTK_BOX(open_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), opencard);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row_prefilled(state, module_id, status, "Send Through It",
+                "--at-stack", "/dev/ttyUSB2 send 0 hello",
+                "A connection id and a payload, either as text or as hex. Hex "
+                "is sent as bytes on the data channel; text is announced with "
+                "its length first, which is the two-step the module's own "
+                "grammar requires."));
+        gtk_box_append(GTK_BOX(send_body), res);
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row_prefilled(state, module_id, status, "Close It",
+                "--at-stack", "/dev/ttyUSB2 close 0",
+                "A connection id. A socket the module opened without being told "
+                "to close stays open until the module is powered off."));
+    }
+    gtk_box_append(GTK_BOX(body), send);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "What a run costs", "",
+                "The steps this page would take, in order.",
+                (const char *[]) { "--at-plan stack" },
+                (const char *[]) { "This Page" }, 1));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+/* ── 65_rcs — the RCS messaging plane ───────────────────────────────────
+   Four pages, in the order the surfaces are worth looking at: the codecs a
+   message actually travels in, the document that tells a handset where the
+   network lives, the query that answers with a subscriber's capabilities, and
+   the reference tables. None of these pages has a transmit control, because the
+   module has no transmit verb: an RCS message that reaches a network has to be
+   originated by an identity the operator can attribute. */
+
+static GtkWidget *
+rcs_build_messages(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RCS MESSAGES",
+        "CPIM (RFC 3862) and MSRP (RFC 4975/4976) are the two codecs an RCS "
+        "message actually travels in. Each carries an identity claim, and each "
+        "claim is only checked if something on the path decides to check it.",
+        &body);
+    GtkWidget *build_body, *parse_body;
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *parse = verb_card("PARSE", &parse_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(build_body), mod_arg_row(state, module_id, status,
+        "CPIM message", "--cpim-build",
+        "sip:alice@example.invalid sip:bob@example.invalid hello",
+        "From, to, then the body. Content-Length counts octets, so a body with "
+        "an accented character is longer than the character count suggests."));
+    gtk_box_append(GTK_BOX(build_body), mod_arg_row(state, module_id, status,
+        "MSRP frame", "--msrp-build",
+        "msrps://relay.example.invalid:2855/a;tcp msrps://bob@example.invalid/b;tcp",
+        "To-Path then From-Path. The relay is the box that is supposed to check "
+        "the authenticated connection owns the From-Path it claims."));
+    gtk_box_append(GTK_BOX(build_body), res);
+    gtk_box_append(GTK_BOX(body), build);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(parse_body), mod_arg_row(state, module_id, status,
+        "CPIM file", "--cpim-parse", "message.cpim",
+        "Headers and octet count, plus the findings that matter: no Message-ID, "
+        "or a sender and recipient that are the same identity."));
+    gtk_box_append(GTK_BOX(parse_body), mod_arg_row(state, module_id, status,
+        "MSRP file", "--msrp-parse", "frame.msrp",
+        "Framing, transaction-id length, the closing terminator and whether "
+        "From-Path is present at all."));
+    gtk_box_append(GTK_BOX(parse_body), res);
+    gtk_box_append(GTK_BOX(body), parse);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+rcs_build_config(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RCS AUTOCONFIGURATION",
+        "The document a handset fetches on first boot names the IMS APN, the "
+        "P-CSCF, the MSRP relay, the presence server and the chatbot list. It is "
+        "served over plain HTTPS to anyone who asks for it.", &body);
+    GtkWidget *read_body, *fetch_body;
+    GtkWidget *read = verb_card("READ A DOCUMENT", &read_body);
+    GtkWidget *fetch = verb_card("FETCH", &fetch_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(read_body), mod_arg_row(state, module_id, status,
+        "Classify", "--config-parse", "rcs-config.xml",
+        "Flattens the provisioning tree and buckets every name into IMS, MSRP, "
+        "presence, chatbot or file transfer. Names it does not recognise stay "
+        "unclassified rather than being forced into a bucket."));
+    gtk_box_append(GTK_BOX(read_body), mod_arg_row(state, module_id, status,
+        "Raw flatten", "--config-flat", "rcs-config.xml",
+        "The path, name and value of every parameter, before classification."));
+    gtk_box_append(GTK_BOX(read_body), res);
+    gtk_box_append(GTK_BOX(body), read);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(fetch_body), mod_arg_row(state, module_id, status,
+        "Candidates", "--config-fetch", "example.invalid",
+        "A host or operator domain. Tries the four URLs a handset tries, GET "
+        "only, and reports unobserved rather than absent when none answer."));
+    gtk_box_append(GTK_BOX(fetch_body), res);
+    gtk_box_append(GTK_BOX(body), fetch);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+rcs_build_caps(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CAPABILITY DISCOVERY",
+        "A SIP OPTIONS carrying RCS feature tags answers with the capabilities "
+        "of a subscriber, not of a server. Whether it answers a caller with no "
+        "relationship to that subscriber is the whole question.", &body);
+    GtkWidget *build_body, *read_body, *audit_body;
+    GtkWidget *build = verb_card("BUILD THE QUERY", &build_body);
+    GtkWidget *read = verb_card("READ AN ANSWER", &read_body);
+    GtkWidget *audit = verb_card("AUDIT DISCLOSURE", &audit_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(build_body), mod_arg_row(state, module_id, status,
+        "Capability query", "--sip-cap-build", "sip:user@example.invalid",
+        "The target the query names. Both dialects go in the same request, "
+        "because a phone that knows one and a network that answers the other is "
+        "the normal case."));
+    gtk_box_append(GTK_BOX(build_body), res);
+    gtk_box_append(GTK_BOX(body), build);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(read_body), mod_arg_row(state, module_id, status,
+        "Answer file", "--sip-cap-parse", "answer.sip",
+        "A captured response. Two hundred with features is a disclosure; a 401 "
+        "or 407 is an authentication requirement and is not a finding."));
+    gtk_box_append(GTK_BOX(read_body), res);
+    gtk_box_append(GTK_BOX(body), read);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(audit_body), mod_arg_row(state, module_id, status,
+        "Compare two answers", "--presence-audit",
+        "known.sip unknown.sip",
+        "One response for an address the caller has a relationship with, one for "
+        "an address it does not. Identical answers prove nothing; different ones "
+        "prove the network answers questions about a subscriber."));
+    gtk_box_append(GTK_BOX(audit_body), res);
+    gtk_box_append(GTK_BOX(body), audit);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+rcs_build_reference(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("REFERENCE",
+        "The feature tags in both dialects, and what a transmit test would "
+        "require before it could be called one.", &body);
+    GtkWidget *ref_body;
+    GtkWidget *ref = verb_card("TABLES", &ref_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(ref_body), mod_arg_choices(state, module_id, status,
+        "Show", "",
+        "Twenty tokens across the OMA CPM ICSI refs and the 3GPP/GSMA IARI urns, "
+        "with the document that defines each one.",
+        (const char *[]) { "--features", "--plan", "--status-tsv" },
+        (const char *[]) { "Feature tags", "Lab plan", "Module state" }, 3));
+    gtk_box_append(GTK_BOX(ref_body), res);
+    gtk_box_append(GTK_BOX(body), ref);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static ModuleSubmenuEntry rcs_entries[] = {
+    { "Messages", "mail-message-new-symbolic", NULL, rcs_build_messages },
+    { "Autoconfig", "text-x-generic-symbolic", NULL, rcs_build_config },
+    { "Discovery", "network-transmit-receive-symbolic", NULL, rcs_build_caps },
+    { "Reference", "dialog-information-symbolic", NULL, rcs_build_reference },
+};
+
+
+static ModuleSubmenuEntry atm_entries[] = {
+    { "Ports", "network-wireless-symbolic", NULL, atm_build_ports },
+    { "Identity", "avatar-default-symbolic", NULL, atm_build_identity },
+    { "Serving cell", "network-cellular-symbolic", NULL, atm_build_radio },
+    { "SIM files", "folder-symbolic", NULL, atm_build_sim },
+    { "Radio control", "preferences-system-symbolic", NULL, atm_build_ctrl },
+    { "NV items", "drive-harddisk-symbolic", NULL, atm_build_nv },
+    { "Modem stack", "network-server-symbolic", NULL, atm_build_stack },
+};
+
+
 
 static GtkWidget *
 suci_catcher_build_cell(AppState *state, const char *module_id,
@@ -40760,4 +41719,8 @@ register_all_modules(void)
                              G_N_ELEMENTS(osh_entries), NULL);
     module_registry_register("58_suci_catcher", suci_catcher_entries,
                              G_N_ELEMENTS(suci_catcher_entries), NULL);
+    module_registry_register("64_modem_at", atm_entries,
+                             G_N_ELEMENTS(atm_entries), NULL);
+    module_registry_register("65_rcs", rcs_entries,
+                             G_N_ELEMENTS(rcs_entries), NULL);
 }
