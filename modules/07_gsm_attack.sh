@@ -2775,6 +2775,12 @@ gatk_selftest() {
     chk cms-a54-rc   "$(gatk_build_cipher_mode A5/9 >/dev/null 2>&1; echo $?)" "2"
     chk cms-cr-bad   "$(gatk_build_cipher_mode A5/2 2 >/dev/null 2>&1; echo $?)" "2"
     chk cms-alg-a51  "$(gatk_alg_wire_code A5/1)" "0"
+    # A5/0 must be refused rather than silently emitted as A5/1: the wire code
+    # function cannot tell them apart, so the builder is the place that has to.
+    chk cms-a50-refused "$(gatk_build_cipher_mode A5/0 0 >/dev/null 2>&1; echo $?)" "2"
+    chk cms-a50-names-why \
+        "$(gatk_build_cipher_mode A5/0 0 2>&1 | grep -c 'no ciphering is SC=0')" "1"
+    chk cms-a51-built "$(gatk_build_cipher_mode A5/1 0)" "06350104"
     chk cms-alg-a52  "$(gatk_alg_wire_code A5/2)" "1"
     chk cms-alg-a57  "$(gatk_alg_wire_code A5/7)" "6"
 
@@ -3048,9 +3054,12 @@ gatk_selftest() {
     chk catcher-missing-capture "$(gatk_catcher_watch "$d/nope.pcap" >/dev/null 2>&1; echo $?)" "1"
 
     #  A5/0 downgrade. The command is three octets because SC=0 carries no
-    #  algorithm identifier at all; the four-octet builder cannot express it,
-    #  and the row below pins that instead of hiding it.
-    chk downgrade-existing-a50-is-a51 "$(gatk_build_cipher_mode A5/0)" "06350104"
+    #  algorithm identifier at all; the four-octet builder cannot express it.
+    #  Asking that builder for A5/0 is now refused rather than answered with the
+    #  A5/1 octet, and the SC=0 form comes from --cipher-downgrade below.
+    chk downgrade-builder-refuses-a50 \
+        "$(gatk_build_cipher_mode A5/0 >/dev/null 2>&1; echo $?)" "2"
+    chk downgrade-builder-a51-unchanged "$(gatk_build_cipher_mode A5/1)" "06350104"
     local dg; dg=$(gatk_cmd_cipher_downgrade A5/1)
     chk downgrade-l3        "$(fld "$dg" l3_hex)"          "063500"
     chk downgrade-length    "$(fld "$dg" length_octets)"   "3"
@@ -3843,6 +3852,20 @@ gatk_alg_name() {
 
 gatk_build_cipher_mode() {
     local alg="${1:-A5/2}" cr="${2:-0}" code
+    # A5/0 has no code point in this field: "no ciphering" is SC=0 with no
+    # algorithm, and gatk_alg_wire_code maps it onto A5/1's value because the
+    # two share an index in the older tables. Emitting the A5/1 octet for a
+    # request that said A5/0 would be a command that does the opposite of what
+    # it was asked to do, so it is refused here by name. The SC=0 form is
+    # built by --cipher-downgrade, which is the verb that means it.
+    # tools/check-cipher-mode-octet.sh puts every octet this builder can emit in
+    # front of tshark, which reads 0x01 as A5/1 through 0x0d as A5/7 and 0x00
+    # as "no ciphering" -- the mapping is measured, not assumed.
+    case "${alg:-}" in
+        A5/0|a5/0|0)
+            printf 'ERROR\tA5/0 cannot be built here: no ciphering is SC=0 with no algorithm, and this builder would emit the A5/1 octet instead. Use --cipher-downgrade for the SC=0 command\n' >&2
+            return 2 ;;
+    esac
     code=$(gatk_alg_wire_code "$alg") || {
         printf 'ERROR\tunknown cipher algorithm "%s" (want A5/1..A5/7)\n' "$alg" >&2; return 2; }
     [[ "$cr" =~ ^[01]$ ]] || { printf 'ERROR\tcipher response must be 0 or 1\n' >&2; return 2; }
