@@ -183,7 +183,14 @@ def ie_amf_ue_ngap_id(value):
 
 
 def ie_nas_pdu(nas):
-    """NAS-PDU: OCTET STRING, a length determinant then the bytes."""
+    """NAS-PDU: OCTET STRING, a length determinant then the bytes.
+
+    The determinant is the OCTET STRING's own, inside the open type -- not a
+    duplicate of the IE length that precedes it. A reader who counts octets and
+    finds one more than the NAS message needs will suspect the encoder; tshark
+    settles it, reading 0026 0005 04 7e 00 5b 01 as id-NAS-PDU carrying 7e005b01
+    with no Malformed verdict.
+    """
     writer = AperWriter()
     writer.length_determinant(len(nas))
     writer.octets(nas)
