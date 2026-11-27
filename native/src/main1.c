@@ -6996,6 +6996,8 @@ static const ChipRow chip_rows[] = {
     { "04_tower_map",        "--history",             NEED_NO, DOES_READS },
     { "04_tower_map",        "--info",                NEED_NO, DOES_READS },
     { "04_tower_map",        "--list-tsv",            NEED_NO, DOES_READS },
+    { "04_tower_map",        "--map-heat",            NEED_NO, DOES_BUILDS },
+    { "04_tower_map",        "--map-layer",           NEED_NO, DOES_BUILDS },
     { "04_tower_map",        "--menu",                NEED_NO, DOES_READS },
     { "04_tower_map",        "--quiet",               NEED_NO, DOES_READS },
     { "04_tower_map",        "--selftest",            NEED_NO, DOES_READS },
@@ -8319,6 +8321,7 @@ static const ChipRow chip_rows[] = {
     { "61_gnss",             "--gpsd-lie",            NEED_NO, DOES_SENDS },
     { "61_gnss",             "--gpsd-trust",          NEED_NO, DOES_READS },
     { "61_gnss",             "--help",                NEED_NO, DOES_READS },
+    { "61_gnss",             "--map-track",           NEED_NO, DOES_BUILDS },
     { "61_gnss",             "--nmea",                NEED_NO, DOES_READS },
     { "61_gnss",             "--nmea-file",           NEED_NO, DOES_READS },
     { "61_gnss",             "--nmea-gga",            NEED_NO, DOES_BUILDS },
@@ -8457,6 +8460,8 @@ static const ChipRow chip_rows[] = {
     { "49_ntn",              "--help",                NEED_NO, DOES_READS },
     { "49_ntn",              "--info",                NEED_NO, DOES_READS },
     { "49_ntn",              "--koffset",             NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--map-layer",           NEED_NO, DOES_BUILDS },
+    { "49_ntn",              "--map-pass",            NEED_NO, DOES_BUILDS },
     { "49_ntn",              "--menu",                NEED_NO, DOES_READS },
     { "49_ntn",              "--plan",                NEED_NO, DOES_READS },
     { "49_ntn",              "--quiet",               NEED_NO, DOES_READS },
@@ -12265,6 +12270,19 @@ dashboard_module(const char *id)
         if (g_strcmp0(modules[i].id, id) == 0)
             return &modules[i];
     return NULL;
+}
+
+/* The Map's inspector hands back the module that wrote a layer row. This is
+   the only place that knows what "open that module" means, so the page keeps
+   knowing nothing about notebooks. */
+static void
+map_open_module_cb(const char *module_id, gpointer user_data)
+{
+    AppState *state = user_data;
+    const ModuleDefinition *mod = dashboard_module(module_id);
+
+    if (state == NULL || mod == NULL) return;
+    open_module(state, mod);
 }
 
 static void
@@ -20402,8 +20420,13 @@ boot_build_ui(AppState *state, GtkApplication *app)
        moving eight of them to slot a ninth in the middle is how every
        `--tab N` and every saved place in state/ui.tsv would start opening the
        wrong page. */
-    gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
-        map_page_new(IMSISTING_ROOT), gtk_label_new("Map"));
+    {
+        GtkWidget *map_page = map_page_new(IMSISTING_ROOT);
+
+        map_page_set_module_opener(map_page, map_open_module_cb, state);
+        gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
+            map_page, gtk_label_new("Map"));
+    }
     /* Page 9 is the Fleet: which remote nodes exist, what each one measured,
        and what each has heard. Appended last for the same reason again -- the
        drawer lists it under Map, but a page index is a position. */
@@ -23343,7 +23366,8 @@ static ModuleSubmenuEntry tmap_entries[] = {
     { "Tower database",
       "network-workgroup-symbolic",
       "#IMPORT A FILE|~--import-opencellid|~--import-mls"
-      "|#LOOK AT THE RESULT|--heatmap|--store-tsv",
+      "|#LOOK AT THE RESULT|--heatmap|--store-tsv"
+      "|#PUT IT ON THE MAP|--map-layer|--map-heat",
       NULL },
 };
 /* --------------------------------------------------------------------------
@@ -37978,9 +38002,40 @@ gnss_build_trust(AppState *state, const char *module_id,
     return outer;
 }
 
+static GtkWidget *
+gnss_build_map(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WHERE IT WENT",
+        "A logged walk turned into the two layers the Map page reads: the track "
+        "the receiver reported, and the fixes that could not have been reached "
+        "at the speed it also reported.", &body);
+    GtkWidget *card_body;
+
+    GtkWidget *card = verb_card("WRITE THE TRACK", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Write the layers", "--map-track", "an NMEA log",
+        "Reads GGA and RMC, checks every checksum, drops quality-0 fixes, and "
+        "writes loot/map/layers/gnss-track-<name>.tsv plus a second layer of "
+        "the fixes that would need a speed the log never claimed."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("READ A TRACK", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Read the tells", "--spoof-detect", "a file of fixes",
+        "The same question asked of a record instead of a log: which of these "
+        "fixes cannot be one machine's path."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gnss_entries[] = {
     { "Receiver", "find-location-symbolic", NULL, gnss_build_receiver },
     { "Trust", "security-high-symbolic", NULL, gnss_build_trust },
+    { "On the map", "mark-location-symbolic", NULL, gnss_build_map },
 };
 /* 62_gtpu — the GTP-U user plane.
  *
@@ -39509,6 +39564,45 @@ ntn_build_gmr(AppState *state, const char *module_id,
  * the next pass. SIB19 tells a UE the state vector; this page is what produces
  * it, which is why it sits inside the NTN module rather than beside it. */
 static GtkWidget *
+ntn_build_map(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ON THE MAP",
+        "What the orbit already knows, written as the layers the Map page "
+        "reads: the footprint a beam covers, the circle one range puts the "
+        "handset on, and the ground track a pass traces.", &body);
+    GtkWidget *cover_body, *pass_body;
+    GtkWidget *cover = verb_card("WHAT ONE INSTANT COVERS", &cover_body);
+    GtkWidget *pass = verb_card("WHAT ONE PASS TRACES", &pass_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(cover_body), mod_arg_row(state, module_id, status,
+        "Write the layers", "--map-layer", "element-set.txt 0 10",
+        "Element set, minutes past the epoch, minimum elevation. Writes the "
+        "sub-satellite point and the footprint circle; with a range it adds "
+        "the ring that one timing-advance measurement puts the handset on."));
+    gtk_box_append(GTK_BOX(cover_body), res);
+    gtk_box_append(GTK_BOX(body), cover);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(pass_body), mod_arg_row(state, module_id, status,
+        "Write the track", "--map-pass", "52.0 13.4 element-set.txt 6",
+        "Latitude, longitude, element set, hours. One track row per minute the "
+        "satellite is above the elevation floor, each with the time it was "
+        "there, so the Map page can replay the pass instead of drawing a "
+        "static line."));
+    gtk_box_append(GTK_BOX(pass_body), res);
+    gtk_box_append(GTK_BOX(body), pass);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
 ntn_build_orbit(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
@@ -39589,6 +39683,7 @@ static ModuleSubmenuEntry ntn_entries[] = {
       ntn_build_feeder },
     { "Legacy satellite", "phone-symbolic", NULL, ntn_build_gmr },
     { "The orbit", "x-office-calendar-symbolic", NULL, ntn_build_orbit },
+    { "On the map", "mark-location-symbolic", NULL, ntn_build_map },
 };
 /* 50_gprs — GPRS / EDGE.
  *

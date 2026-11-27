@@ -480,6 +480,51 @@ cannot show. Cells, observations and geo-tagged casebook entries are drawn on th
 same plane so that "the tower we heard" and "the place we heard it from" can be
 compared without exporting anything.
 
+A layer file is one row per observation, header first:
+
+```
+kind    label   lat     lon     radius_m  key        source   [ts]  [azimuth] [beamwidth] [range_m]
+point   a mark
+ring    a dashed circle, radius_m out
+circle  a disc, radius_m out
+track   one vertex; consecutive vertices join in file order
+area    a count with no centre — drawn only when it also states an azimuth
+```
+
+The columns after `source` are optional and absent ones read as "not stated",
+never as zero: a `ts` (ISO 8601 UTC) puts a row in the time window the
+**Time window** slider cuts, an `area` with `azimuth` and `range_m` becomes a
+wedge, and `track` rows with a `ts` can be replayed. Undated rows are never
+hidden by that slider — a row that never claimed a time cannot be aged out.
+
+Verbs write these files; the page never invents one. `04_tower_map --map-layer`
+puts survey points down one per positioned observation, `--map-heat` writes the
+density grid as `area` rows, `49_ntn --map-layer` writes a footprint, a
+sub-satellite point and (with a range) the ring one timing measurement puts a
+handset on, `49_ntn --map-pass` writes a ground track with the time of each
+sample, and `61_gnss --map-track` writes a logged walk plus a second layer of the
+fixes that would have needed a speed the log never claimed. Every one of them
+refuses by name when there is nothing positioned to write, because an empty map
+is not an empty world.
+
+The page itself is read-only over those files and says so where it matters: the
+preamble counts drawn-of-total per layer with the module that wrote it, a click
+inspects a mark (with a door back to its module), a right-click copies a
+coordinate in decimal or DMS or the row as TSV, **Measure** places two points and
+reports the great-circle distance and true bearing, **Snapshot** writes a PNG (or
+an SVG) with a caption block naming what was drawn, the view bounds and the
+timestamp, and the directory is watched so a module that finishes while the
+window is open shows up without a reload.
+
+The layer sheet — one row per file, with its swatch, its counts, the module that
+wrote it and a fit-to-layer button — is hidden until the pointer reaches the
+bottom edge of the canvas. It is drawn *above* the map rather than under it, so
+reading it costs the canvas nothing: a strip in the layout shrank the map every
+time a layer file appeared, and a map whose scale changes because a file was
+written is a map you cannot measure against. The popover behind the toolbar's
+view button carries the same switches plus the time window, so nothing on the
+sheet is reachable only by hovering.
+
 ### Fleet
 
 The registry of remote nodes: name, host, transport, class, role, capabilities,

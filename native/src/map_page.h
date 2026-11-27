@@ -20,6 +20,14 @@
    loot/map/layers inbox; it is not copied, so it must outlive the widget. */
 GtkWidget *map_page_new(const char *root_dir);
 
+/* A layer row knows which module wrote it, and a reader who clicks a mark
+   usually wants that module open. The page has no notebook of its own, so it
+   hands the module id back to whoever does. */
+typedef void (*MapModuleOpener)(const char *module_id, gpointer user_data);
+
+void map_page_set_module_opener(GtkWidget *page, MapModuleOpener opener,
+                                gpointer user_data);
+
 /* Display-free checks, called from the GUI's --selftest: pan direction, the
    clamps, the zoom floor. Returns the number of failed assertions. */
 int map_page_selftest(void);

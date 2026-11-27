@@ -477,6 +477,236 @@ gnss_spoof_detect() {
 # the writer, and most consumers never check that the reader is the one that
 # owns the device. This verb states which consumers on this machine take a
 # position from gpsd and what they would accept from it.
+# ── the map inbox ───────────────────────────────────────────────────────
+# The map page reads a directory of TSVs, one file per layer, and it does not
+# ask which module wrote them. A GNSS log is already a track: it has a time, a
+# position and a speed for every fix, which is exactly what a canvas needs and
+# exactly what a terminal throws away.
+#
+# Two layers come out of one log, and they are two because they are not the
+# same claim. `gnss-track` is the path the receiver reported. `gnss-claimed`
+# holds only the fixes that cannot be reconciled with the speed the same
+# receiver reported, which is the shape a spoof leaves: a position that moved
+# further than the machine said it was moving. A page that drew them as one
+# layer would be reporting a forgery as a flight.
+gnss_map_layers_dir() { printf '%s\n' "$LOOT_DIR/map/layers"; }
+
+gnss_map_dir() {
+    local dir="${1:-}"
+    [[ -n "$dir" ]] || dir=$(gnss_map_layers_dir)
+    mkdir -p "$dir" 2>/dev/null || {
+        printf 'ERROR\tcannot create %s\n' "$(gnss_sanitize "$dir")" >&2
+        printf 'WHY\tthe map page reads a directory; a track that cannot be written is a log nobody will see\n' >&2
+        return 1; }
+    printf '%s\n' "$dir"
+}
+
+gnss_map_key() {  # <log-file>
+    local b; b=$(basename "${1:-track}")
+    printf '%s' "${b%.*}" | tr -c 'A-Za-z0-9._-' '-'
+}
+
+gnss_map_track() {  # <nmea-log> [--out DIR] [--max-kn N]
+    local log="" dir="" maxkn="900"
+    while (($#)); do
+        case "$1" in
+            --out)
+                dir="${2:-}"
+                [[ -n "$dir" ]] || { printf 'ERROR\t--out needs a directory\n' >&2; return 2; }
+                shift 2 ;;
+            --max-kn)
+                maxkn="${2:-}"
+                [[ -n "$maxkn" ]] || { printf 'ERROR\t--max-kn needs knots\n' >&2; return 2; }
+                shift 2 ;;
+            --help|-h)
+                printf 'usage: --map-track <nmea-log> [--out DIR] [--max-kn N]\n'
+                return 0 ;;
+            -*) printf 'ERROR\t--map-track does not take %s\n' "$(gnss_sanitize "$1")" >&2; return 2 ;;
+            *)
+                if [[ -n "$log" ]]; then
+                    printf 'ERROR\t--map-track reads one log, not %s and %s\n' \
+                        "$(gnss_sanitize "$log")" "$(gnss_sanitize "$1")" >&2
+                    return 2
+                fi
+                log="$1"; shift ;;
+        esac
+    done
+    [[ -n "$log" ]] || {
+        printf 'ERROR\t--map-track needs <nmea-log>\n' >&2
+        printf 'WHY\tthere is no track without a log, and an empty layer would draw a machine that never moved\n' >&2
+        return 2; }
+    [[ -r "$log" ]] || {
+        printf 'MISSING\t%s\n' "$(gnss_sanitize "$log")" >&2
+        printf 'WHY\t--map-track reads a log already on disk; it never opens the receiver itself\n' >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-log: nothing was read, so nothing is claimed about where the machine went\n'
+        return 1; }
+
+    dir=$(gnss_map_dir "$dir") || return 1
+    local key track_f claim_f tmp_stats
+    key=$(gnss_map_key "$log")
+    track_f="$dir/gnss-track-$key.tsv"
+    claim_f="$dir/gnss-claimed-$key.tsv"
+    tmp_stats="$MOD_TMP/map-track.$$.stats"
+
+    awk -v TR="$track_f" -v CL="$claim_f" -v KEY="$key" -v MAXKN="$maxkn" -v STATS="$tmp_stats" '
+    # Portable XOR: awk has no bitwise operator in POSIX, and the checksum is
+    # the only thing standing between a log and a track that was never read.
+    function bxor(a, b,   r, i, x, y, p) {
+        r = 0; p = 1
+        for (i = 0; i < 8; i++) {
+            x = int(a / p) % 2; y = int(b / p) % 2
+            if (x != y) r += p
+            p *= 2
+        }
+        return r
+    }
+    function calc(s,   i, c) {
+        c = 0
+        for (i = 1; i <= length(s); i++) c = bxor(c, ord(substr(s, i, 1)))
+        return c
+    }
+    function ord(ch) { return (ch in ORD) ? ORD[ch] : 0 }
+    function hex(n) { return sprintf("%02X", n) }
+    function dmm(v, hemi,   d, m) {
+        if (v == "") return ""
+        d = int(v / 100); m = v - d * 100
+        v = d + m / 60
+        if (hemi == "S" || hemi == "W") v = -v
+        return v
+    }
+    function rad(dg) { return dg * 3.14159265358979323846 / 180 }
+    function dist(la1, lo1, la2, lo2,   p1, p2, dp, dl, a) {
+        p1 = rad(la1); p2 = rad(la2); dp = rad(la2 - la1); dl = rad(lo2 - lo1)
+        a = sin(dp/2)^2 + cos(p1) * cos(p2) * sin(dl/2)^2
+        if (a > 1) a = 1
+        return 2 * 6371000 * atan2(sqrt(a), sqrt(1 - a))
+    }
+    function iso(sod, date,   hh, mi, ss, dd, mo, yy) {
+        if (sod == "" ) return ""
+        hh = substr(sod, 1, 2) + 0; mi = substr(sod, 3, 2) + 0; ss = substr(sod, 5, 2) + 0
+        if (date == "" || length(date) != 6) return sprintf("%02d:%02d:%02d", hh, mi, ss)
+        dd = substr(date, 1, 2) + 0; mo = substr(date, 3, 2) + 0; yy = substr(date, 5, 2) + 0
+        return sprintf("%04d-%02d-%02dT%02d:%02d:%02dZ", 2000 + yy, mo, dd, hh, mi, ss)
+    }
+    BEGIN {
+        for (i = 32; i < 127; i++) ORD[sprintf("%c", i)] = i
+        print "kind\tlabel\tlat\tlon\tradius_m\tkey\tsource\tts" > TR
+        print "kind\tlabel\tlat\tlon\tradius_m\tkey\tsource\tts" > CL
+        nfix = 0; nbad = 0; nvalid = 0; nskip = 0; jumps = 0; total = 0; nemit = 0
+        last_sod = ""; date = ""; have = 0
+    }
+    {
+        line = $0
+        gsub(/\r/, "", line)
+        if (substr(line, 1, 1) != "$") next
+        star = index(line, "*")
+        if (star < 2) { nbad++; next }
+        body = substr(line, 2, star - 2)
+        want = toupper(substr(line, star + 1, 2))
+        if (want != "" && hex(calc(body)) != want) { nbad++; next }
+        n = split(body, f, ",")
+        typ = substr(f[1], 3)
+        if (typ == "GGA") {
+            # fix quality 0 is not a position: the fields behind it are
+            # placeholders, and drawing them would put a machine where the
+            # receiver said it was not.
+            if (f[7] + 0 == 0) { nskip++; next }
+            if (f[3] == "" || f[5] == "") { nskip++; next }
+            la = dmm(f[3], f[4]); lo = dmm(f[5], f[6])
+            sod = f[2]; spd = ""; emit(la, lo, sod, "")
+            nfix++
+        } else if (typ == "RMC") {
+            if (f[3] != "A") { nskip++; next }
+            if (f[4] == "" || f[6] == "") { nskip++; next }
+            la = dmm(f[4], f[5]); lo = dmm(f[6], f[7])
+            if (f[10] != "") date = f[10]
+            emit(la, lo, f[2], f[8])
+            nfix++
+        }
+    }
+    function emit(la, lo, sod, spd,   d, allowed, dt, t, lbl, s) {
+        if (la == "" || lo == "") { nskip++; return }
+        # One row per fix time: a receiver emits GGA and RMC for the same
+        # instant, and two rows at one instant is a track that stalls. The
+        # count has to happen after this test, or the summary claims twice the
+        # rows the file holds.
+        if (sod != "" && sod == last_sod) return
+        last_sod = sod
+        nvalid++
+        t = iso(sod, date)
+        # A log with no speed column (GGA) cannot accuse a fix of moving
+        # faster than it could: the bound then comes from --max-kn, which is
+        # a claim that nothing on the ground moves that fast, not a claim
+        # about this machine.
+        s = (spd == "" ? MAXKN + 0 : spd + 0)
+        if (have) {
+            d = dist(plat, plon, la, lo)
+            total += d
+            dt = 1
+            if (last_sod_p != "" && sod != "") {
+                a = substr(last_sod_p, 1, 2) * 3600 + substr(last_sod_p, 3, 2) * 60 + substr(last_sod_p, 5, 2) + 0
+                b = substr(sod, 1, 2) * 3600 + substr(sod, 3, 2) * 60 + substr(sod, 5, 2) + 0
+                dt = b - a
+                if (dt <= 0) dt = 1
+            }
+            # The allowance is twice what the reported speed can cover: a
+            # receiver quantises, a vehicle brakes, and neither is a forgery.
+            allowed = (s + 1) * 0.514444 * dt * 2
+            if (d > allowed && d > 50) {
+                jumps++
+                printf "point\t%s claimed jump %d m\t%.6f\t%.6f\t0\t%s/j%d\tgnss\t%s\n", \
+                    KEY, d + 0, la, lo, KEY, jumps, t > CL
+            }
+        }
+        plat = la; plon = lo; plat_s = la; have = 1; last_sod_p = sod
+        nemit++
+        printf "track\t%s fix %d\t%.6f\t%.6f\t0\t%s/f%d\tgnss\t%s\n", KEY, nemit, la, lo, KEY, nemit, t > TR
+    }
+    END {
+        printf "positioned\t%d\nsentences\t%d\nvalid\t%d\nbad_checksum\t%d\nno_fix\t%d\njumps\t%d\ndistance_m\t%.0f\n", \
+            nfix, nfix + nbad + nskip, nvalid, nbad, nskip, jumps, total > STATS
+        close(TR); close(CL); close(STATS)
+    }
+    ' "$log" || {
+        printf 'ERROR\tcould not read %s\n' "$(gnss_sanitize "$log")" >&2
+        return 1; }
+
+    local nfix nvalid nbad nskip jumps dm nsent
+    nfix=$(awk -F'\t' '$1=="positioned"{print $2}' "$tmp_stats" 2>/dev/null)
+    nsent=$(awk -F'\t' '$1=="sentences"{print $2}' "$tmp_stats" 2>/dev/null)
+    nvalid=$(awk -F'\t' '$1=="valid"{print $2}' "$tmp_stats" 2>/dev/null)
+    nbad=$(awk -F'\t' '$1=="bad_checksum"{print $2}' "$tmp_stats" 2>/dev/null)
+    nskip=$(awk -F'\t' '$1=="no_fix"{print $2}' "$tmp_stats" 2>/dev/null)
+    jumps=$(awk -F'\t' '$1=="jumps"{print $2}' "$tmp_stats" 2>/dev/null)
+    dm=$(awk -F'\t' '$1=="distance_m"{print $2}' "$tmp_stats" 2>/dev/null)
+    rm -f "$tmp_stats"
+
+    if [[ -z "$nvalid" || "$nvalid" == "0" ]]; then
+        rm -f "$track_f" "$claim_f"
+        printf 'MISSING\tpositioned-fixes\n'
+        printf 'WHY\t%s sentence(s) were read and none carried a valid fix, so a track layer would be an empty path drawn as a machine that stayed still\n' \
+            "${nfix:-0}"
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-positioned-fixes: a log with no fix is not a machine that did not move\n'
+        return 1
+    fi
+
+    printf 'layer\tgnss-track-%s\n' "$key"
+    printf 'path\t%s\n' "$track_f"
+    printf 'claim_layer\t%s\n' "$claim_f"
+    printf 'sentences\t%s\n' "${nsent:-0}"
+    printf 'positioned\t%s\n' "${nfix:-0}"
+    printf 'track_rows\t%s\n' "$nvalid"
+    printf 'bad_checksum\t%s\n' "${nbad:-0}"
+    printf 'no_fix\t%s\n' "${nskip:-0}"
+    printf 'jumps\t%s\n' "${jumps:-0}"
+    printf 'distance_m\t%s\n' "${dm:-0}"
+    printf 'columns\tkind label lat lon radius_m key source ts\n'
+    printf 'verdict\twritten\n'
+    return 0
+}
+
 gnss_gpsd_trust() {
     local sock="${GPSD_SOCKET:-/var/run/gpsd.sock}"
     printf 'socket\t%s\n' "$sock"
@@ -650,6 +880,61 @@ gnss_selftest() {
     chk lie-bad-lat         "$(gnss_gpsd_lie 91 0 >/dev/null 2>&1; echo $?)" "2"
     chk lie-ok              "$(fld "$(gnss_gpsd_lie 52.37 4.89)" forged_lat)" "52.37"
 
+    # 9. The map inbox: one log, two layers. The track is the path the receiver
+    #    reported; the claim layer holds only the fixes that cannot be
+    #    reconciled with the speed reported beside them. A page that drew them
+    #    as one layer would report a forgery as a flight, so the split is the
+    #    thing under test, not the drawing.
+    local mt mtrc nmea savedloot="$LOOT_DIR"
+    export LOOT_DIR="$d/loot"
+    nmea="$d/track.nmea"
+    {
+        ck() { gnss_nmea_cksum "$1"; }
+        b='GPRMC,120000.00,A,4807.038,N,01131.000,E,10.00,0.00,010125,,,A'
+        printf '$%s*%s\n' "$b" "$(ck "$b")"
+        b='GPRMC,120030.00,A,4807.080,N,01131.050,E,10.00,0.00,010125,,,A'
+        printf '$%s*%s\n' "$b" "$(ck "$b")"
+        b='GPRMC,120100.00,A,4817.238,N,01141.200,E,10.00,0.00,010125,,,A'
+        printf '$%s*%s\n' "$b" "$(ck "$b")"
+        b='GPGGA,120130.00,,,,,0,00,99.9,,M,,M,,'
+        printf '$%s*%s\n' "$b" "$(ck "$b")"
+        b='GPGGA,120200.00,4817.300,N,01141.300,E,1,08,0.9,545.4,M,46.9,M,,'
+        printf '$%s*%s\n' "$b" "$(ck "$b")"
+        printf '$GPRMC,120230.00,A,4817.400,N,01141.400,E,10.00,0.00,010125,,,A*00\n'
+    } > "$nmea"
+
+    mt=$(gnss_map_track "$nmea"); mtrc=$?
+    chk maptrack-rc       "$mtrc" "0"
+    chk maptrack-cols     "$(head -1 "$d/loot/map/layers/gnss-track-track.tsv" | awk -F'\t' '{print NF}')" "8"
+    chk maptrack-rows     "$(fld "$mt" track_rows)" "4"
+    chk maptrack-file-rows "$(tail -n +2 "$d/loot/map/layers/gnss-track-track.tsv" | grep -c .)" "4"
+    chk maptrack-kind     "$(tail -n +2 "$d/loot/map/layers/gnss-track-track.tsv" | cut -f1 | sort -u)" "track"
+    chk maptrack-ts       "$(tail -n +2 "$d/loot/map/layers/gnss-track-track.tsv" | cut -f8 | sed -n 1p)" "2025-01-01T12:00:00Z"
+    chk maptrack-ts-all   "$(tail -n +2 "$d/loot/map/layers/gnss-track-track.tsv" | cut -f8 | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T')" "4"
+    # A checksum that does not match is not a fix, and a quality-0 GGA is not a
+    # fix either: both are counted, and neither reaches the layer.
+    chk maptrack-badcks   "$(fld "$mt" bad_checksum)" "1"
+    chk maptrack-nofix    "$(fld "$mt" no_fix)" "1"
+    chk maptrack-fixes    "$(fld "$mt" positioned)" "4"
+    chk maptrack-sent     "$(fld "$mt" sentences)" "6"
+    # One row per fix time: GGA and RMC for the same instant are one fix.
+    chk maptrack-dedup    "$(tail -n +2 "$d/loot/map/layers/gnss-track-track.tsv" | cut -f8 | sort -u | grep -c .)" "4"
+    chk maptrack-jumps    "$(fld "$mt" jumps)" "1"
+    chk maptrack-claim    "$(tail -n +2 "$d/loot/map/layers/gnss-claimed-track.tsv" | grep -c .)" "1"
+    chk maptrack-claim-k  "$(tail -n +2 "$d/loot/map/layers/gnss-claimed-track.tsv" | cut -f1)" "point"
+    chk maptrack-claim-lab "$(tail -n +2 "$d/loot/map/layers/gnss-claimed-track.tsv" | cut -f2)" "track claimed jump 22617 m"
+    chk maptrack-dist     "$([[ "$(fld "$mt" distance_m)" -gt 20000 ]] && echo yes || echo no)" "yes"
+    chk maptrack-noarg    "$(gnss_map_track >/dev/null 2>&1; echo $?)" "2"
+    chk maptrack-missing  "$(gnss_map_track "$d/none.nmea" >/dev/null 2>&1; echo $?)" "1"
+    chk maptrack-missing-msg "$(gnss_map_track "$d/none.nmea" 2>&1 | awk -F'\t' '$1=="verdict"{print $2}')" "unobserved"
+    chk maptrack-badflag  "$(gnss_map_track "$nmea" --nope >/dev/null 2>&1; echo $?)" "2"
+    # A log with no valid fix refuses rather than writing an empty path.
+    printf '$GPGGA,120130.00,,,,,0,00,99.9,,M,,M,,*5E\n' > "$d/nofix.nmea"
+    local mtx; mtx=$(gnss_map_track "$d/nofix.nmea" 2>&1)
+    chk maptrack-nofix-rc "$(gnss_map_track "$d/nofix.nmea" >/dev/null 2>&1; echo $?)" "1"
+    chk maptrack-nofix-name "$(printf '%s\n' "$mtx" | awk -F'\t' '$1=="MISSING"{print $2}')" "positioned-fixes"
+    export LOOT_DIR="$savedloot"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     if (( bad )); then printf 'RESULT\tFAIL(%d)\n' "$bad"; return 1; fi
     printf 'RESULT\tPASS\n'
@@ -673,6 +958,10 @@ gnss — receiver interface, position integrity, and the fix trust model
                             build a NAV-PVT frame
   --spoof-detect <track.tsv> [max_kn]
                             which tells a fix track carries, and what each means
+  --map-track <nmea-log> [--out DIR] [--max-kn N]
+                            write loot/map/layers/gnss-track-<name>.tsv and the
+                            gnss-claimed-<name>.tsv layer of fixes that outran
+                            the speed beside them, for the GUI map to draw
                             (TSV: utc lat lon speed_kn hdop sats)
   --constellations          what each system's civil signal does and does not
                             authenticate
@@ -720,6 +1009,7 @@ gnss_cli_main() {
         --ubx)          gnss_ubx_parse "${1:-}" ;;
         --ubx-pvt)      gnss_ubx_pvt "${1:-}" "${2:-}" "${3:-}" ;;
         --spoof-detect) gnss_spoof_detect "${1:-}" "${2:-900}" ;;
+        --map-track)    gnss_map_track "$@" ;;
         --constellations) gnss_constellations ;;
         --gpsd-trust)   gnss_gpsd_trust ;;
         --gpsd-lie)     gnss_gpsd_lie "${1:-}" "${2:-}" ;;

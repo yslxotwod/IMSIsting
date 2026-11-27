@@ -671,6 +671,197 @@ tmap_heatmap() {  # [--cell-deg N] [--help]
     return 0
 }
 
+# ── the map inbox ───────────────────────────────────────────────────────
+# The GUI map reads a directory of TSVs, one file per layer, and it does not
+# ask which module wrote them. That contract is why the survey has to write the
+# file itself: --export-kml and --export-geojson are formats a person opens by
+# hand, and a survey that only exists as a file to be opened by hand never
+# appears on the map at the moment it was measured.
+#
+#   kind	label	lat	lon	radius_m	key	source
+#
+# `kind` is point | ring | circle | area, or track when the page should draw a
+# path. `radius_m` is what the row claims and nothing more: a survey point has
+# no footprint, so it is 0 and the page draws a dot where the fix was. The
+# column is not an estimate of coverage, and inventing one here would put a
+# plausible circle around a measurement that never came with one.
+tmap_map_layers_dir() { printf '%s\n' "$LOOT_DIR/map/layers"; }
+
+# Resolve --out, creating it, and refuse by name when it cannot be created.
+tmap_map_dir() {
+    local dir="${1:-}"
+    [[ -n "$dir" ]] || dir=$(tmap_map_layers_dir)
+    mkdir -p "$dir" 2>/dev/null || {
+        printf 'ERROR\tcannot create %s\n' "$(tmap_sanitize "$dir")" >&2
+        printf 'WHY\tthe map page reads a directory; a layer that cannot be written is a survey that will not appear\n' >&2
+        return 1; }
+    printf '%s\n' "$dir"
+}
+
+tmap_map_layer() {  # [--out <dir>]
+    local dir=""
+    while (($#)); do
+        case "$1" in
+            --out)
+                dir="${2:-}"
+                [[ -n "$dir" ]] || {
+                    printf 'ERROR\t--out needs a directory\n' >&2; return 2; }
+                shift 2 ;;
+            --help|-h) printf 'usage: --map-layer [--out <dir>]\n'; return 0 ;;
+            *) printf 'ERROR\t--map-layer does not take %s\n' "$(tmap_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    dir=$(tmap_map_dir "$dir") || return 1
+    local file="$dir/towers.tsv"
+    local tmp="$MOD_TMP/map-towers.$$.tsv"
+
+    local npos nall nunpos
+    nall=$(( $(tmap_point_count) + $(tmap_tower_count) ))
+    npos=$(tmap_positioned 2>/dev/null | grep -c . || true); [[ -z "$npos" ]] && npos=0
+    nunpos=$(( nall - npos )); (( nunpos < 0 )) && nunpos=0
+
+    (( npos > 0 )) || {
+        rm -f "$tmp"
+        printf 'MISSING\tpositioned-towers\n'
+        printf 'WHY\t%s known row(s) carry no coordinate, and a layer with no rows would draw a world with nothing on it, which is not the same answer as a world with nothing there\n' \
+            "$nall"
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-positioned-towers: the map is empty because nothing was placed, not because nothing exists\n'
+        return 1; }
+
+    {
+        printf 'kind\tlabel\tlat\tlon\tradius_m\tkey\tsource\n'
+        tmap_store_tsv | tail -n +2 |
+            awk -F'\t' '
+                function num(v) { return v ~ /^[-+]?[0-9]+([.][0-9]+)?$/ }
+                function saf(v) { gsub(/[\t\r\n]/, " ", v); return v }
+                function lab(   s) {
+                    s = ($9 == "" ? "" : $9)
+                    if ($6 != "")  s = s (s == "" ? "" : " ") $6
+                    if ($10 != "") s = s (s == "" ? "" : " ") $10
+                    return s == "" ? "unidentified cell" : s
+                }
+                num($2) && num($3) {
+                    k = $10
+                    if ($9 != "") k = $9 "/" k
+                    printf "point\t%s\t%s\t%s\t0\t%s\t%s\n", saf(lab()), $2, $3, saf(k), saf($13)
+                }
+            '
+    } > "$tmp" 2>/dev/null
+
+    local rows measured adv
+    rows=$(tail -n +2 "$tmp" | grep -c . || true); [[ -z "$rows" ]] && rows=0
+    measured=$(tail -n +2 "$tmp" | awk -F'\t' '$7 == "measured"' | grep -c . || true); [[ -z "$measured" ]] && measured=0
+    adv=$(tail -n +2 "$tmp" | awk -F'\t' '$7 == "advertised"' | grep -c . || true); [[ -z "$adv" ]] && adv=0
+
+    if (( rows == 0 )); then
+        rm -f "$tmp"
+        printf 'MISSING\tpositioned-towers\n' 
+        printf 'WHY\tno store row carried both a latitude and a longitude as numbers\n'
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-positioned-towers: rows exist but none of them is a position\n'
+        return 1
+    fi
+
+    mv -f "$tmp" "$file"
+    printf 'layer\ttowers\n'
+    printf 'path\t%s\n' "$file"
+    printf 'rows\t%s\n' "$rows"
+    printf 'skipped\t%s\n' "$nunpos"
+    printf 'measured\t%s\n' "$measured"
+    printf 'advertised\t%s\n' "$adv"
+    printf 'columns\tkind label lat lon radius_m key source\n'
+    printf 'verdict\twritten\n'
+    return 0
+}
+
+tmap_map_heat() {  # [--cell-deg N] [--out <dir>]
+    local cell_deg="0.05" dir=""
+    while (($#)); do
+        case "$1" in
+            --cell-deg)
+                cell_deg="${2:-}"
+                [[ -n "$cell_deg" ]] || {
+                    printf 'ERROR\t--cell-deg needs a number of degrees\n' >&2; return 2; }
+                shift 2 ;;
+            --out)
+                dir="${2:-}"
+                [[ -n "$dir" ]] || { printf 'ERROR\t--out needs a directory\n' >&2; return 2; }
+                shift 2 ;;
+            --help|-h) printf 'usage: --map-heat [--cell-deg 0.05] [--out <dir>]\n'; return 0 ;;
+            *) printf 'ERROR\t--map-heat does not take %s\n' "$(tmap_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    awk -v d="$cell_deg" 'BEGIN { exit !(d ~ /^[0-9]+([.][0-9]+)?$/ && d + 0 > 0) }' || {
+        printf 'ERROR\t--cell-deg must be degrees as a positive number, not %s\n' \
+            "$(tmap_sanitize "$cell_deg")" >&2
+        return 2; }
+    dir=$(tmap_map_dir "$dir") || return 1
+    local file="$dir/heat.tsv"
+    local tmp="$MOD_TMP/map-heat.$$.tsv"
+
+    tmap_positioned > "$MOD_TMP/map-heat-src.$$.tsv" 2>/dev/null
+    local npos
+    npos=$(grep -c . "$MOD_TMP/map-heat-src.$$.tsv" 2>/dev/null || true); [[ -z "$npos" ]] && npos=0
+    (( npos > 0 )) || {
+        rm -f "$MOD_TMP/map-heat-src.$$.tsv" "$tmp"
+        printf 'MISSING\tpositioned-towers\n'
+        printf 'WHY\ta density layer needs coordinates and no stored row has one\n'
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-positioned-towers: an empty density layer is not an empty area\n'
+        return 1; }
+
+    {
+        printf 'kind\tlabel\tlat\tlon\tradius_m\tkey\tsource\n'
+        awk -F'\t' -v d="$cell_deg" '
+            function absv(x){ return x < 0 ? -x : x }
+            { n++; la[n] = $1 + 0; lo[n] = $2 + 0
+              if (n == 1) { mnla = la[1]; mxla = la[1]; mnlo = lo[1]; mxlo = lo[1] }
+              if (la[n] < mnla) mnla = la[n]; if (la[n] > mxla) mxla = la[n]
+              if (lo[n] < mnlo) mnlo = lo[n]; if (lo[n] > mxlo) mxlo = lo[n] }
+            END {
+                cells = 0
+                for (i = 1; i <= n; i++) {
+                    r = int((la[i] - mnla) / d + 1e-9)
+                    c = int((lo[i] - mnlo) / d + 1e-9)
+                    k = r SUBSEP c
+                    if (!(k in g)) { cr[cells] = r; cc[cells] = c; cells++ }
+                    g[k]++
+                }
+                for (i = 0; i < cells; i++) {
+                    r = cr[i]; c = cc[i]; k = r SUBSEP c
+                    clat = mnla + (r + 0.5) * d
+                    clon = mnlo + (c + 0.5) * d
+                    ns = 111320 * d / 2
+                    ew = 111320 * d * cos(clat * 3.14159265358979 / 180) / 2
+                    rad = sqrt(ns * ns + ew * ew) + 0.5
+                    printf "area\t%d tower%s\t%.6f\t%.6f\t%d\tr%dc%d\theatmap %.2f deg\n", \
+                        g[k], (g[k] == 1 ? "" : "s"), clat, clon, rad + 0, r, c, d
+                }
+            }' "$MOD_TMP/map-heat-src.$$.tsv"
+    } > "$tmp" 2>/dev/null
+    rm -f "$MOD_TMP/map-heat-src.$$.tsv"
+
+    local rows cells
+    rows=$(tail -n +2 "$tmp" | grep -c . || true); [[ -z "$rows" ]] && rows=0
+    (( rows > 0 )) || {
+        rm -f "$tmp"
+        printf 'MISSING\theat-cells\n'
+        printf 'WHY\tthe positioned rows produced no cell, so there is nothing to draw\n'
+        printf 'verdict\tunobserved\n'
+        return 1; }
+    mv -f "$tmp" "$file"
+    cells=$(tail -n +2 "$file" | awk -F'\t' '{s += $2 + 0} END { print s + 0 }')
+    printf 'layer\theat\n'
+    printf 'path\t%s\n' "$file"
+    printf 'rows\t%s\n' "$rows"
+    printf 'towers\t%s\n' "$cells"
+    printf 'cell_deg\t%.6f\n' "$cell_deg"
+    printf 'columns\tkind label lat lon radius_m key source\n'
+    printf 'verdict\twritten\n'
+    return 0
+}
+
 # The merged store: survey points and imported towers, one header, one row per
 # tower, because every consumer -- this module's exporters, the GUI, another
 # module reading the loot directory -- would otherwise have to know which of
@@ -975,6 +1166,62 @@ tmap_selftest() {
     chk store-unplaced "$(printf '%s\n' "$stv" | awk -F'\t' '$13=="measured" && $2==""' | grep -c .)" "1"
     chk store-arg-rc "$(tmap_store_tsv extra >/dev/null 2>&1; echo $?)" "2"
 
+    # 20. The map inbox: the layer the GUI reads, written where the page looks,
+    #     with the two kinds of fact still marked as two kinds of fact. A layer
+    #     that dropped the unplaced row silently would draw a survey that looks
+    #     complete, so the count of what was skipped is part of the answer.
+    local ml mr mlrc
+    mr=$(tmap_map_layer); mlrc=$?
+    ml=$(printf '%s\n' "$mr" | awk -F'\t' '$1=="path"{print $2}')
+    chk maplayer-rc       "$mlrc" "0"
+    chk maplayer-file     "$([[ -f "$ml" ]] && echo yes || echo no)" "yes"
+    chk maplayer-path     "$ml" "$d/loot/map/layers/towers.tsv"
+    chk maplayer-rows     "$(fld "$mr" rows)" "7"
+    chk maplayer-measured "$(fld "$mr" measured)" "1"
+    chk maplayer-advert   "$(fld "$mr" advertised)" "6"
+    chk maplayer-skipped  "$(fld "$mr" skipped)" "1"
+    chk maplayer-cols     "$(head -1 "$ml" | awk -F'\t' '{print NF}')" "7"
+    chk maplayer-header   "$(head -1 "$ml" | cut -f1)" "kind"
+    chk maplayer-kind     "$(tail -n +2 "$ml" | cut -f1 | sort -u)" "point"
+    chk maplayer-source   "$(tail -n +2 "$ml" | cut -f7 | sort -u | tr '\n' ',')" "advertised,measured,"
+    chk maplayer-radius   "$(tail -n +2 "$ml" | cut -f5 | sort -u)" "0"
+    chk maplayer-latnum   "$(tail -n +2 "$ml" | awk -F'\t' '$3 !~ /^-?[0-9.]+$/' | grep -c .)" "0"
+    chk maplayer-arg-rc   "$(tmap_map_layer --nope >/dev/null 2>&1; echo $?)" "2"
+    chk maplayer-out      "$(tmap_map_layer --out "$d/elsewhere" >/dev/null 2>&1; echo $?)" "0"
+    chk maplayer-out-file "$([[ -f "$d/elsewhere/towers.tsv" ]] && echo yes || echo no)" "yes"
+
+    # 21. The density layer: one area per populated cell, with a radius that is
+    #     the cell's own half-diagonal rather than a guess at coverage.
+    local mh mhr
+    mh=$(tmap_map_heat); mhr=$?
+    chk mapheat-rc        "$mhr" "0"
+    chk mapheat-cols      "$(head -1 "$d/loot/map/layers/heat.tsv" | awk -F'\t' '{print NF}')" "7"
+    chk mapheat-kind      "$(tail -n +2 "$d/loot/map/layers/heat.tsv" | cut -f1 | sort -u)" "area"
+    chk mapheat-fld-rows  "$(fld "$mh" rows)" "3"
+    chk mapheat-towers    "$(fld "$mh" towers)" "7"
+    chk mapheat-radnum    "$(tail -n +2 "$d/loot/map/layers/heat.tsv" | awk -F'\t' '$5 !~ /^[0-9]+$/' | grep -c .)" "0"
+    chk mapheat-label     "$(printf '%s\n' "$mh" | grep -c '^layer')" "1"
+    chk mapheat-baddeg-rc "$(tmap_map_heat --cell-deg 0 >/dev/null 2>&1; echo $?)" "2"
+
+    # 22. With nothing placed, both writers refuse by name instead of leaving an
+    #     empty layer behind for the page to draw as an empty world.
+    local savedloot="$LOOT_DIR"
+    LOOT_DIR="$d/empty"
+    TMAP_POINTS="$d/empty/tower_map/points.tsv"; TMAP_TOWERS="$d/empty/tower_map/towers.tsv"
+    mkdir -p "$d/empty/tower_map"
+    tmap_init_store
+    local el elrc eh ehrc
+    el=$(tmap_map_layer 2>&1); elrc=$?
+    eh=$(tmap_map_heat 2>&1); ehrc=$?
+    chk maplayer-empty-rc  "$elrc" "1"
+    chk maplayer-empty-name "$(printf '%s\n' "$el" | awk -F'\t' '$1=="MISSING"{print $2}')" "positioned-towers"
+    chk maplayer-empty-verdict "$(printf '%s\n' "$el" | awk -F'\t' '$1=="verdict"{print $2}')" "unobserved"
+    chk maplayer-empty-nofile "$([[ -f "$d/empty/map/layers/towers.tsv" ]] && echo yes || echo no)" "no"
+    chk mapheat-empty-rc    "$ehrc" "1"
+    chk mapheat-empty-name  "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="MISSING"{print $2}')" "positioned-towers"
+    LOOT_DIR="$savedloot"
+    TMAP_POINTS="$sp"; TMAP_TOWERS="$st"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1005,6 +1252,8 @@ tmap_menu() {
   [11] import MLS CSV
   [12] tower heatmap
   [13] merged store (TSV)
+  [14] write the map layer
+  [15] write the density layer
   [0]  back
 
 M
@@ -1033,6 +1282,10 @@ M
                 if [[ -n "$cdeg" ]]; then tmap_heatmap --cell-deg "$cdeg"; else tmap_heatmap; fi
                 read -rp "  press enter " _ ;;
             13) tmap_store_tsv | column -t -s$'\t' 2>/dev/null || tmap_store_tsv
+                read -rp "  press enter " _ ;;
+            14) tmap_map_layer; read -rp "  press enter " _ ;;
+            15) read -rp "  cell size in degrees [0.05]> " cdeg
+                if [[ -n "$cdeg" ]]; then tmap_map_heat --cell-deg "$cdeg"; else tmap_map_heat; fi
                 read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -1069,6 +1322,8 @@ tmap_cli_main() {
         --import-opencellid) tmap_import opencellid "$@" ;;
         --import-mls)   tmap_import mls "$@" ;;
         --heatmap)      tmap_heatmap "$@" ;;
+        --map-layer)    tmap_map_layer "$@" ;;
+        --map-heat)     tmap_map_heat "$@" ;;
         --store-tsv)    tmap_store_tsv "$@" ;;
         --clear)        tmap_clear ;;
         --start-gpsd)   tmap_start_gpsd "${1:-/dev/ttyUSB0}" ;;
@@ -1100,6 +1355,11 @@ Usage: $0 COMMAND
   --import-opencellid <csv>  merge an OpenCellID export into the tower store
   --import-mls <csv>        merge a Mozilla Location Service export
   --heatmap [--cell-deg N]  tower density grid over the store bounding box
+  --map-layer [--out DIR]   write loot/map/layers/towers.tsv, one point per
+                            positioned row, for the GUI map to draw
+  --map-heat [--cell-deg N] [--out DIR]
+                            write loot/map/layers/heat.tsv, one area per density
+                            cell, for the GUI map to draw
   --store-tsv               survey points and imported towers as one TSV
   --clear                   empty the survey store
   --selftest                verify the store, the importers, the heatmap and the exporters without GPS

@@ -770,6 +770,264 @@ ntn_footprint() {
     }'
 }
 
+# ── the map inbox ───────────────────────────────────────────────────────
+# The GUI map reads a directory of TSVs, one file per layer, and it does not
+# ask which module wrote them. Satellite geometry is the one thing in this
+# toolkit that is natively geographic: an orbit is a position, a footprint is a
+# circle on the ground, and a pass is a path. Until those are written where the
+# page looks, the numbers stop at the terminal.
+#
+#   kind	label	lat	lon	radius_m	key	source	[ts]
+#
+# `radius_m` is the radius the row claims. A footprint's radius is the
+# elevation contour, not a coverage claim: at 10 degrees it is the circle within
+# which the satellite is workable, and the row says which elevation it used.
+ntn_map_layers_dir() { printf '%s\n' "$LOOT_DIR/map/layers"; }
+
+ntn_map_dir() {
+    local dir="${1:-}"
+    [[ -n "$dir" ]] || dir=$(ntn_map_layers_dir)
+    mkdir -p "$dir" 2>/dev/null || {
+        printf 'ERROR\tcannot create %s\n' "$(ntn_sanitize "$dir")" >&2
+        printf 'WHY\tthe map page reads a directory; a layer that cannot be written is a pass that will not appear\n' >&2
+        return 1; }
+    printf '%s\n' "$dir"
+}
+
+ntn_map_key() {  # <tle-file>
+    local b; b=$(basename "${1:-tle}")
+    printf '%s' "${b%.*}" | tr -c 'A-Za-z0-9._-' '-'
+}
+
+ntn_map_layer() {  # <tle-file> [tsince-min] [min-elev] [--range-km KM] [--out DIR]
+    local file="" tsince="0" minel="10" rng="" dir="" pos=0
+    while (($#)); do
+        case "$1" in
+            --range-km)
+                rng="${2:-}"
+                [[ -n "$rng" ]] || { printf 'ERROR\t--range-km needs kilometres\n' >&2; return 2; }
+                shift 2 ;;
+            --out)
+                dir="${2:-}"
+                [[ -n "$dir" ]] || { printf 'ERROR\t--out needs a directory\n' >&2; return 2; }
+                shift 2 ;;
+            --help|-h)
+                printf 'usage: --map-layer <tle-file> [tsince-min] [min-elev] [--range-km KM] [--out DIR]\n'
+                return 0 ;;
+            -*)
+                printf 'ERROR\t--map-layer does not take %s\n' "$(ntn_sanitize "$1")" >&2
+                return 2 ;;
+            *)
+                pos=$((pos + 1))
+                case "$pos" in
+                    1) file="$1" ;;
+                    2) tsince="$1" ;;
+                    3) minel="$1" ;;
+                    *) printf 'ERROR\t--map-layer takes a file, a tsince and a minimum elevation, not %s\n' \
+                           "$(ntn_sanitize "$1")" >&2; return 2 ;;
+                esac
+                shift ;;
+        esac
+    done
+    [[ -r "$file" ]] || {
+        printf 'ERROR\t--map-layer needs <tle-file> [tsince-min] [min-elev]\n' >&2
+        printf 'WHY\tthere is no position to map without an element set\n' >&2
+        return 2; }
+
+    local fp; fp=$(ntn_footprint "$file" "$tsince" "$minel") || return $?
+    local slat slon srad
+    slat=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="subpoint-lat"{print $2; exit}')
+    slon=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="subpoint-lon"{print $2; exit}')
+    srad=$(printf '%s\n' "$fp" | awk -F'\t' '$1=="radius-km"{print $2; exit}')
+    [[ -n "$slat" && -n "$slon" ]] || {
+        printf 'MISSING\tsubpoint\n'
+        printf 'WHY\tthe element set produced no sub-satellite point, so there is nothing to place\n'
+        printf 'verdict\tunobserved\n'
+        return 1; }
+
+    dir=$(ntn_map_dir "$dir") || return 1
+    local key file_out tmp
+    key=$(ntn_map_key "$file")
+    file_out="$dir/ntn-$key.tsv"
+    tmp="$MOD_TMP/map-ntn.$$.tsv"
+
+    # A range ring is the honest counterpart to the footprint: the footprint is
+    # where the satellite can be worked, a range circle is where a measured
+    # slant range puts the ground. Both are circles and they are not the same
+    # circle, which is exactly the confusion --timing-geoloc exists to name.
+    local ring_m="" ring_note=""
+    if [[ -n "$rng" ]]; then
+        [[ "$rng" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+            printf 'ERROR\t--range-km wants kilometres as a number, not %s\n' "$(ntn_sanitize "$rng")" >&2
+            return 2; }
+        local rv rx ry rz rmag alt
+        rv=$(ntn_state_at "$file" "$tsince") || return $?
+        [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; return 1; }
+        rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1)
+        ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2)
+        rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+        rmag=$(awk -v x="$rx" -v y="$ry" -v z="$rz" 'BEGIN{printf "%.4f", sqrt(x*x+y*y+z*z)}')
+        alt=$(awk -v r="$rmag" -v re="$NTN_R_EARTH_KM" 'BEGIN{printf "%.4f", r-re}')
+        local gm
+        gm=$(ntn_geo_math "" "$rng" "" "$slat" "$slon" "$alt" "" "")
+        ring_m=$(printf '%s\n' "$gm" | awk -F'\t' '$1=="ground_radius_km"{printf "%.0f", $2*1000}')
+        if [[ -z "$ring_m" ]]; then
+            printf 'ERROR\tthe range %s km does not reach the ground from %s km altitude\n' \
+                "$(ntn_sanitize "$rng")" "$alt" >&2
+            return 2
+        fi
+        ring_note="at $alt km altitude"
+    fi
+
+    {
+        printf 'kind\tlabel\tlat\tlon\tradius_m\tkey\tsource\n'
+        printf 'point\t%s subpoint t+%smin\t%s\t%s\t0\t%s/subpoint\tntn\n' \
+            "$key" "$tsince" "$slat" "$slon" "$key"
+        printf 'circle\t%s footprint %s deg t+%smin\t%s\t%s\t%s\t%s/footprint\tntn\n' \
+            "$key" "$minel" "$tsince" "$slat" "$slon" \
+            "$(awk -v r="$srad" 'BEGIN{printf "%.0f", r*1000}')" "$key"
+        if [[ -n "$ring_m" ]]; then
+            printf 'ring\t%s range %s km %s\t%s\t%s\t%s\t%s/range\tntn\n' \
+                "$key" "$rng" "$ring_note" "$slat" "$slon" "$ring_m" "$key"
+        fi
+    } > "$tmp"
+
+    mv -f "$tmp" "$file_out"
+    local rows
+    rows=$(tail -n +2 "$file_out" | grep -c . || true); [[ -z "$rows" ]] && rows=0
+    printf 'layer\tntn-%s\n' "$key"
+    printf 'path\t%s\n' "$file_out"
+    printf 'rows\t%s\n' "$rows"
+    printf 'subpoint\t%s,%s\n' "$slat" "$slon"
+    printf 'footprint_radius_km\t%s\n' "$srad"
+    printf 'min_elevation_deg\t%s\n' "$minel"
+    [[ -n "$ring_m" ]] && printf 'range_radius_km\t%s\n' "$(awk -v r="$ring_m" 'BEGIN{printf "%.1f", r/1000}')"
+    printf 'columns\tkind label lat lon radius_m key source\n'
+    printf 'verdict\twritten\n'
+    return 0
+}
+
+ntn_map_pass() {  # <lat> <lon> <tle-file> [hours] [min-elev] [--out DIR]
+    local lat="${1:-}" lon="${2:-}" file="${3:-}" hours="${4:-2}" minel="${5:-0}"
+    (($# > 0)) && shift
+    (($# > 0)) && shift
+    (($# > 0)) && shift
+    (($# > 0)) && shift
+    (($# > 0)) && shift
+    local dir=""
+    while (($#)); do
+        case "$1" in
+            --out)
+                dir="${2:-}"
+                [[ -n "$dir" ]] || { printf 'ERROR\t--out needs a directory\n' >&2; return 2; }
+                shift 2 ;;
+            --help|-h)
+                printf 'usage: --map-pass <lat> <lon> <tle-file> [hours] [min-elev] [--out DIR]\n'
+                return 0 ;;
+            *)
+                printf 'ERROR\t--map-pass does not take %s\n' "$(ntn_sanitize "$1")" >&2
+                return 2 ;;
+        esac
+    done
+    [[ -n "$lat" && -n "$lon" && -r "$file" ]] || {
+        printf 'ERROR\t--map-pass needs <lat> <lon> <tle-file>\n' >&2
+        return 2; }
+
+    local epoch_ts epoch_iso epoch_jd
+    epoch_ts=$(ntn_epoch_ts "$file") || {
+        printf 'GUARD\tepoch-unreadable\trefusing: without an epoch the samples cannot be placed on a clock, and a track with no time is a shape that never happened\n'
+        return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    epoch_jd=$(ntn_jd "$epoch_iso")
+
+    # A per-sample subshell is what the rest of this module does, and it costs.
+    # The cap is stated rather than silent: a track that stopped early and did
+    # not say so is a hole in a picture that reads as a gap in the sky.
+    local want step cap n
+    step=1
+    want=$(awk -v h="$hours" 'BEGIN{printf "%d", h*60/1}')
+    cap=600
+    n="$want"; (( n > cap )) && n="$cap"
+
+    dir=$(ntn_map_dir "$dir") || return 1
+    local key file_out tmp
+    key=$(ntn_map_key "$file")
+    file_out="$dir/ntn-pass-$key.tsv"
+    tmp="$MOD_TMP/map-pass.$$.tsv"
+
+    {
+        printf 'kind\tlabel\tlat\tlon\tradius_m\tkey\tsource\tts\n'
+        printf 'point\tobserver\t%s\t%s\t0\t%s/observer\tntn\t%s\n' \
+            "$lat" "$lon" "$key" "$epoch_iso"
+    } > "$tmp"
+
+    local i tsince rv slat slon el inpass=0 passes=0 samples=0 skipped=0
+    for (( i = 0; i <= n; i++ )); do
+        tsince=$(awk -v i="$i" -v s="$step" 'BEGIN{printf "%.2f", i*s}')
+        rv=$(ntn_state_at "$file" "$tsince") || break
+        [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv" >&2; break; }
+        local rx ry rz vx vy vz gmst look
+        rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1)
+        ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2)
+        rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+        vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1)
+        vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2)
+        vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+        gmst=$(ntn_topocentric "$lat" "$lon" 0 "$tsince" "$epoch_jd")
+        look=$(ntn_look "$lat" "$lon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$gmst")
+        el=$(printf '%s' "$look" | cut -f2)
+        samples=$((samples + 1))
+        if awk -v e="$el" -v m="$minel" 'BEGIN{exit !(e < m)}'; then
+            skipped=$((skipped + 1)); inpass=0; continue
+        fi
+        (( inpass == 0 )) && { passes=$((passes + 1)); inpass=1; }
+        # The sub-satellite point from the same state vector, so the path on the
+        # ground and the elevation that decided to draw it come from one number.
+        slat=$(awk -v RX="$rx" -v RY="$ry" -v RZ="$rz" -v G="$gmst" -v RE="$NTN_R_EARTH_KM" \
+            'BEGIN{ pi=atan2(0,-1); g=G*pi/180
+                    ex=cos(g)*RX+sin(g)*RY; ey=-sin(g)*RX+cos(g)*RY; ez=RZ
+                    printf "%.6f", atan2(ez, sqrt(ex*ex+ey*ey))*180/pi }')
+        slon=$(awk -v RX="$rx" -v RY="$ry" -v RZ="$rz" -v G="$gmst" \
+            'BEGIN{ pi=atan2(0,-1); g=G*pi/180
+                    ex=cos(g)*RX+sin(g)*RY; ey=-sin(g)*RX+cos(g)*RY
+                    printf "%.6f", atan2(ey, ex)*180/pi }')
+        local iso
+        iso=$(date -u -d "@$(( epoch_ts + i * step * 60 ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+        printf 'track\t%s elev %s deg\t%s\t%s\t0\t%s/t%s\tntn\t%s\n' \
+            "$key" "$(awk -v e="$el" 'BEGIN{printf "%.0f", e}')" \
+            "$slat" "$slon" "$key" "$i" "$iso"
+    done >> "$tmp"
+
+    local rows
+    rows=$(tail -n +2 "$tmp" | grep -c . || true); [[ -z "$rows" ]] && rows=0
+    if (( rows <= 1 )); then
+        rm -f "$tmp"
+        printf 'MISSING\tpass-samples\n'
+        printf 'WHY\tthe satellite never rose above %s degrees from %s,%s inside the window, so a track layer would be a file with no path in it\n' \
+            "$minel" "$lat" "$lon"
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-pass-in-window: no visibility is not the same as a pass that was not sampled\n'
+        return 1
+    fi
+    mv -f "$tmp" "$file_out"
+    printf 'layer\tntn-pass-%s\n' "$key"
+    printf 'path\t%s\n' "$file_out"
+    printf 'rows\t%s\n' "$rows"
+    printf 'passes\t%s\n' "$passes"
+    printf 'samples\t%s\n' "$samples"
+    printf 'below_horizon\t%s\n' "$skipped"
+    printf 'window_minutes\t%s\n' "$n"
+    if (( want > cap )); then
+        printf 'truncated\tyes\n'
+        printf 'truncated_note\tthe window asked for %s minutes; %s were sampled\n' "$want" "$cap"
+    else
+        printf 'truncated\tno\n'
+    fi
+    printf 'columns\tkind label lat lon radius_m key source ts\n'
+    printf 'verdict\twritten\n'
+    return 0
+}
+
 # ── SIB19 NTN-Config ────────────────────────────────────────────────────
 # What a gNB actually broadcasts for an NTN cell (TS 38.331 SIB19): either an
 # ECEF state vector or a set of orbital elements, plus the common timing-advance
@@ -2342,6 +2600,50 @@ TLE
     chk plan-handoff "$(ntn_plan | grep -c '^status	handoff')" "1"
     chk status-transmit "$(ntn_status_tsv | grep -c '^TRANSMIT	none')" "1"
 
+    # 14. The map inbox. The sub-satellite point, the footprint circle and the
+    #     range ring are three different circles around one place, and the
+    #     layer has to keep them apart: a footprint is where the satellite is
+    #     workable, a range ring is where a measured slant range puts the
+    #     ground, and drawing one as the other would be a claim about coverage
+    #     that no measurement in this module makes.
+    local ml mlrc mp mprc
+    ml=$(ntn_map_layer "$d/v2.tle" 0 10 --range-km 900); mlrc=$?
+    chk map-rc          "$mlrc" "0"
+    chk map-file        "$([[ -f "$d/loot/map/layers/ntn-v2.tsv" ]] && echo yes || echo no)" "yes"
+    chk map-cols        "$(head -1 "$d/loot/map/layers/ntn-v2.tsv" | awk -F'\t' '{print NF}')" "7"
+    chk map-rows        "$(fld "$ml" rows)" "3"
+    chk map-kind-count  "$(tail -n +2 "$d/loot/map/layers/ntn-v2.tsv" | cut -f1 | sort -u | tr '\n' ',')" "circle,point,ring,"
+    chk map-subpoint    "$(fld "$ml" subpoint)" "0.0003,105.3812"
+    chk map-radius-num  "$(tail -n +2 "$d/loot/map/layers/ntn-v2.tsv" | cut -f5 | grep -vcE '^[0-9]+$')" "0"
+    chk map-ring-under  "$(awk -v r="$(tail -n +2 "$d/loot/map/layers/ntn-v2.tsv" | awk -F'\t' '$1=="ring"{print $5}')" \
+                            -v f="$(tail -n +2 "$d/loot/map/layers/ntn-v2.tsv" | awk -F'\t' '$1=="circle"{print $5}')" \
+                            'BEGIN{print (r+0 < f+0) ? "yes" : "no"}')" "yes"
+    chk map-nofile-rc   "$(ntn_map_layer "$d/none.tle" >/dev/null 2>&1; echo $?)" "2"
+    chk map-badout-rc   "$(ntn_map_layer "$d/v2.tle" 0 10 --out >/dev/null 2>&1; echo $?)" "2"
+    # A slant range shorter than the altitude matches no ground point, and the
+    # refusal names the altitude it refused against.
+    local mbad; mbad=$(ntn_map_layer "$d/v2.tle" 0 10 --range-km 100 2>&1)
+    chk map-shortrange-rc  "$(ntn_map_layer "$d/v2.tle" 0 10 --range-km 100 >/dev/null 2>&1; echo $?)" "2"
+    chk map-shortrange-msg "$(printf '%s\n' "$mbad" | grep -c 'does not reach the ground')" "1"
+
+    # 15. The pass track carries its own times, and the number of rows is the
+    #     number of samples the satellite was visible in, not the size of the
+    #     window: a track padded to the window would draw a pass that did not
+    #     happen.
+    mp=$(ntn_map_pass 0 105 "$d/v2.tle" 0.25 0); mprc=$?
+    chk mappass-rc      "$mprc" "0"
+    chk mappass-cols    "$(head -1 "$d/loot/map/layers/ntn-pass-v2.tsv" | awk -F'\t' '{print NF}')" "8"
+    chk mappass-rows    "$(fld "$mp" rows)" "$(tail -n +2 "$d/loot/map/layers/ntn-pass-v2.tsv" | grep -c .)"
+    chk mappass-track   "$(tail -n +2 "$d/loot/map/layers/ntn-pass-v2.tsv" | awk -F'\t' '$1=="track"' | grep -c .)" "$(( $(fld "$mp" rows) - 1 ))"
+    chk mappass-ts      "$(tail -n +2 "$d/loot/map/layers/ntn-pass-v2.tsv" | awk -F'\t' '$1=="track"' | cut -f8 | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T')" "$(( $(fld "$mp" rows) - 1 ))"
+    chk mappass-samples "$(fld "$mp" samples)" "$(( $(fld "$mp" below_horizon) + $(fld "$mp" rows) - 1 ))"
+    chk mappass-trunc   "$(fld "$mp" truncated)" "no"
+    chk mappass-noargs  "$(ntn_map_pass '' '' '' >/dev/null 2>&1; echo $?)" "2"
+    # A window in which nothing rises is a refusal, not an empty layer.
+    local mnone; mnone=$(ntn_map_pass 0 105 "$d/v2.tle" 0.05 89 2>&1)
+    chk mappass-none-rc "$(ntn_map_pass 0 105 "$d/v2.tle" 0.05 89 >/dev/null 2>&1; echo $?)" "1"
+    chk mappass-none-name "$(printf '%s\n' "$mnone" | awk -F'\t' '$1=="MISSING"{print $2}')" "pass-samples"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2456,6 +2758,8 @@ ntn_cli_main() {
         --doppler-pass)   ntn_doppler_pass "${1:-}" "${2:-}" "${3:-}" "${4:-1900}" "${5:-10}" ;;
         --ta-schedule)    ntn_ta_schedule "${1:-}" "${2:-}" "${3:-}" "${4:-10}" ;;
         --footprint)      ntn_footprint "${1:-}" "${2:-0}" "${3:-10}" ;;
+        --map-layer)      ntn_map_layer "$@" ;;
+        --map-pass)       ntn_map_pass "$@" ;;
         --ntn-config)     ntn_config_plan "${1:-}" "${2:-0}" ;;
         --store-forward)  ntn_store_forward "${1:-}" "${2:-}" "${3:-}" "${4:-12}" "${5:-10}" ;;
         --regulatory-check) ntn_regulatory "${1:-}" "${2:-0}" "${3:-10}" "${4:-}" "${5:-}" ;;
@@ -2510,6 +2814,13 @@ Usage: $0 COMMAND
   --doppler-pass <lat> <lon> <file> [MHz] [minutes]  range, range-rate, doppler, delay
   --ta-schedule <lat> <lon> <file> [minutes]         timing advance against time
   --footprint <file> [tsince] [min-el]   the illuminated circle and its bounding box
+  --map-layer <file> [tsince] [min-el] [--range-km KM] [--out DIR]
+                            write loot/map/layers/ntn-<name>.tsv: the sub-satellite
+                            point, the footprint circle, and a range ring when a
+                            slant range is supplied
+  --map-pass <lat> <lon> <file> [hours] [min-el] [--out DIR]
+                            write the ground track over the window, one track row
+                            per visible sample with its timestamp
   --ntn-config <file> [tsince]           the ephemeris fields a cell would broadcast
   --store-forward <lat> <lon> <file> [hours] [min-el]  coverage duty cycle, worst gap
   --regulatory-check <file> [tsince] [min-el] [plmn] [lat1,lon1,lat2,lon2]
